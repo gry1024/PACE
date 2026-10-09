@@ -32,7 +32,7 @@ class PaceError(Exception):
 class FeatureUnavailable(PaceError):
     code = "feature_unavailable"
     status_code = 503
-    public_message = "This capability is not wired in the current framework."
+    public_message = "This capability requires additional PACE configuration."
 
 
 # 实现说明：AuthenticationRequired
@@ -83,3 +83,49 @@ class IdempotencyConflict(PaceError):
     code = "idempotency_conflict"
     status_code = 409
     public_message = "This request key has already been used with different input."
+
+
+class AccountUnavailable(PaceError):
+    """账号未完成 Gmail 验证 / 披露同意或被禁用。"""
+
+    code = "account_unavailable"
+    status_code = 403
+    public_message = "A verified, enabled Gmail account with connection consent is required."
+
+
+class EntityNotReady(PaceError):
+    """缺少已完成快照，不能使用 building 数据选择。"""
+
+    code = "entity_not_ready"
+    status_code = 409
+    public_message = "Complete an entity build before connecting."
+
+
+class VersionConflict(PaceError):
+    """乐观版本与当前接受版本不符。"""
+
+    code = "version_conflict"
+    status_code = 409
+    public_message = "The entity changed; retry with its current version."
+
+
+class SelectionLimit(PaceError):
+    """整体选择预算不足；不可静默截候选造成伪 No Match。"""
+
+    code = "selection_limit"
+    status_code = 503
+    public_message = "Selection exceeded its configured time or candidate budget."
+
+
+class DeliveryUnavailable(PaceError):
+    """通知通道缺配置或服务失败，保留任务以供有限重试。"""
+
+    code = "delivery_unavailable"
+    status_code = 502
+    public_message = "The notification delivery could not be completed."
+
+
+class PermanentDeliveryError(DeliveryUnavailable):
+    """已终止或过大 webhook 不应继续重试。"""
+
+    code = "delivery_terminal"

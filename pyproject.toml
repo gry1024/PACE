@@ -14,12 +14,15 @@ dependencies = [
     # Alembic：显式迁移与Schema漂移检查，启动时不自动建表。
     "alembic>=1.20.0",
     # FastAPI：HTTP运维入口与ASGI生命周期，业务Tool交给MCP SDK。
+    "authlib>=1.6,<2",
+    "cryptography>=45",
     "fastapi>=0.142.2",
     # HTTP检查工具；本地连通性验证应注意环境代理。
+    "google-auth[requests]>=2.40,<3",
     "httpx>=0.28.1",
     # 用户指定的官方modelcontextprotocol/python-sdk发行包，限制大版本以防API漂移。
     "mcp>=2.3.0,<3",
-    # 官方SDK兼容接口；当前用于doctor，Ontology业务仍待实现。
+    # 官方兼容 SDK，用于 Ontology 提取与显式 doctor 诊断。
     "openai>=3.26.0",
     # PostgreSQL驱动与池能力，不自行维护驱动协议。
     "psycopg[binary,pool]>=3.3.6",
@@ -28,6 +31,7 @@ dependencies = [
     # asyncio extra带greenlet，支持异步ORM /迁移，不用额外手写连接层。
     "sqlalchemy[asyncio]>=2.1.3",
     # 官方Jev异步SDK；PACE只组织Choice证据与淘汰赛。
+    "standardwebhooks>=1,<2",
     "typesafe-sdk>=0.7.2,<1",
     # ASGI服务运行器；standard包含常用运行依赖。
     "uvicorn[standard]>=0.54.0",

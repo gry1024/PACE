@@ -1,7 +1,7 @@
 # 模块说明
 # 独立 Worker 进程与任务 Handler 生命周期。
 #
-# Worker 只执行已注册类型；当前生产注册表为空，Ontology / Email / Event 尚待接线。
+# Worker 执行已注册 Ontology / Email / Event Handler，未知类型明确失败。
 # 任务执行与续租并发，租约丢失终止当前路径，异常只记录稳定安全code。
 # run_once 返回是否曾领取任务，不是业务副作用成功标志。
 
@@ -14,8 +14,9 @@ from contextlib import suppress
 
 from pace.adapters.db.jobs import JobQueue
 from pace.adapters.db.models import Job
-from pace.adapters.db.session import Database
+from pace.bootstrap import build_container
 from pace.config import Settings
+from pace.domain.errors import PaceError, PermanentDeliveryError
 
 # Handler 只负责具体副作用，任务领取 / 重试 / 租约由 Worker / Queue 管理。
 JobHandler = Callable[[dict], Awaitable[None]]
@@ -72,9 +73,13 @@ class Worker:
             await execution
             # 此处可能返回 False；run_once 不把布尔返回解释成对外成功状态。
             await self.queue.complete(job)
-        except Exception:
+        except Exception as exc:
             # Raw exceptions may contain private payloads or credentials.
-            await self.queue.fail(job, "handler_failed")
+            await self.queue.fail(
+                job,
+                exc.code if isinstance(exc, PaceError) else "handler_failed",
+                **({"terminal": True} if isinstance(exc, PermanentDeliveryError) else {}),
+            )
         finally:
             for task in (heartbeat, execution):
                 if not task.done():
@@ -86,14 +91,15 @@ class Worker:
 # 实现说明：run
 # 装配独立 Worker 的数据库并选择单次或持续轮询。
 #
-# 当前handlers={}有意暴露缺少业务接线；不默认发送真实Email或构建Ontology。
+# 通过 bootstrap 装配持久 Handler；capture 为默认本地通知通道。
 # 空队列按配置sleep，退出时在finally关闭Engine。
 async def run(once: bool):
     settings = Settings()
-    database = Database(settings)
-    queue = JobQueue(database.sessions, lease_seconds=settings.worker_lease_seconds)
-    # 生产业务 Handler 仍待实现；未知 kind 明确失败，不能当作通知成功。
-    worker = Worker(queue, handlers={})  # ontology.build / email.send / event.deliver pending.
+    container = build_container(settings)
+    if container.database is None:
+        raise ValueError("DATABASE_URL is required for the worker.")
+    queue = JobQueue(container.database.sessions, lease_seconds=settings.worker_lease_seconds)
+    worker = Worker(queue, handlers=container.handlers.registry())
     try:
         if once:
             await worker.run_once()
@@ -102,7 +108,7 @@ async def run(once: bool):
                 if not await worker.run_once():
                     await asyncio.sleep(settings.worker_poll_seconds)
     finally:
-        await database.close()
+        await container.close()
 
 
 # 实现说明：main

@@ -136,12 +136,12 @@ class JobQueue:
     #
     # 退避最多300秒；有剩余尝试时queued，耗尽时failed。
     # 错误码截到列长度，原始异常 / 邮件正文 / Key 不存这里。
-    async def fail(self, job: Job, error_code: str) -> bool:
+    async def fail(self, job: Job, error_code: str, *, terminal: bool = False) -> bool:
         # 每次领取才增加 attempts；失败根据当前计数计算有上限退避。
         delay = min(300, 2 ** min(job.attempts, 8))
         return await self._update(
             job,
-            status="failed" if job.attempts >= job.max_attempts else "queued",
+            status="failed" if terminal or job.attempts >= job.max_attempts else "queued",
             available_at=datetime.now(UTC) + timedelta(seconds=delay),
             error_code=error_code[:100],
             lease_id=None,

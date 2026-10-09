@@ -2,61 +2,62 @@
 
 ## Current Snapshot
 
-复核日期：2026-10-08（Asia/Shanghai）。HEAD：`f871a26`（Initial commit）。**下表评估的是本地未提交工作区，不是该提交中的实现**：扫描时 Git 仅跟踪 LICENSE / README，其余框架与旧文档为 untracked，README 已修改。
+复核日期：2026-10-09（Asia/Shanghai）。基础框架已在 `8a30c4f` 保存；后续开发位于 `codex/gmail-mvp`。本页描述当前工作区实现。
 
-开发阶段：基础框架和独立 Selection / 任务基础设施可运行，两项业务用例未接线。**完整 MVP 不能端到端运行**；默认身份验证器与命令均抛 `FeatureUnavailable`，`/readyz` 固定 503。
+阶段：**可运行的本地 MVP 业务闭环**。配置数据库后，API 使用持久 `sync_entity` / `connect`；Worker 实际处理 Ontology 与通知任务。Google Gmail OAuth、系统 Gmail 发信、MCP Events 已有实现及离线边界测试。**真人 Google 登录、真实 Gmail 收件和公网 Host 联调尚未验收**；不能据此宣称已上线。
 
-本次实测：`uv sync --locked` 通过；默认测试 **34 passed / 5 skipped**；启用真实 PostgreSQL 测试 **39 passed**；Ruff check / format check 通过。数据库最初未运行，项目脚本启动后 `doctor --database` 通过；数据库 revision 为 `0001`，`alembic check` 无漂移。显式 `alembic upgrade head` 与空队列 Worker --once 正常退出；离线 Selection 为两轮三次调用。实际 uvicorn 监听验证六个运维端点及 MCP 三种 HTTP 方法的默认身份拒绝。新体系 9 份文档 / ADR 的链接、anchor、围栏检查通过；53 份源码、配置与历史快照 SHA-256 保持不变。2026-10-09 已适配文档检查器到当前结构。验证进程已停止，本地数据库恢复最初的停止状态。未运行真实 Provider / Host / Email 验证；旧文档的模型成功与耗时记录不计入本次证据。执行命令见 [DEVELOPMENT](DEVELOPMENT.md)。
+当前环境保留原有 Jev / LLM 配置，未改写用户凭据。没有 Google 登录客户端、Fernet 密钥、系统 Gmail 发件授权及公网部署配置，所以默认 MCP 身份仍不可用，`/readyz` 返回 503 并列出配置缺口。本地捕获模式不会真实发邮件。
 
-## Module status
+## 功能完成度
 
-Status 只表示下表所定义模块的完成度；Implemented 的基础设施不代表业务用例完成。Tests 列是验证入口，不是全覆盖声明。
+状态含义：Implemented = 代码与相应验收路径存在；Partial = 有实现但关键外部路径未验收；Planned = 尚无实现。Implemented 不等于生产运行效果或服务商凭据已验证。
 
-| Module | Status | Implementation | Entry points | Tests | Notes |
-| --- | --- | --- | --- | --- | --- |
-| 配置、API 装配与运维 | Implemented | `src/pace/config.py`、`src/pace/bootstrap.py`、`src/pace/main.py`、`src/pace/interfaces/http.py` | `Settings`、`create_app`、`build_container`、`/healthz`、`/contracts` | `tests/test_bootstrap.py` | 存活不检测依赖；资源关闭有下述限制 |
-| 输入输出契约与领域值 | Implemented | `src/pace/application/contracts.py`、`src/pace/application/ports.py`；`src/pace/domain/models.py`、`src/pace/domain/errors.py` | `SourceFile`、`SyncEntityInput`、`ConnectInput`、`ConnectResult`、`Principal` | `tests/unit/test_contracts.py` | 结构校验不保证持久化 / 授权；大小边界未全测 |
-| 核心 MCP transport 与分发 | Implemented | `src/pace/interfaces/mcp.py`、`src/pace/interfaces/http.py` | `ProtectedMCP`、`build_server`、`tool_definitions` | `tests/unit/test_mcp.py` | 官方 SDK 实际运行；成功调用由测试 Port 注入，不证明生产业务 |
-| Account / identity / OAuth | Not implemented | `src/pace/application/services.py`（拒绝占位）；`src/pace/application/ports.py`（接口）；`src/pace/adapters/db/models.py`（表） | `UnconfiguredIdentity.verify`、`IdentityVerifier`、`Account` | `tests/unit/test_mcp.py` 仅验证默认拒绝 | 无 Email 验证、Token 验证、注册授权、跨 Host 绑定流程 |
-| 文件 ingestion / Ontology Build / Refresh | Partial | `src/pace/application/contracts.py`、`src/pace/application/ports.py`；`src/pace/adapters/db/models.py` | `SourceFile.validate_content`、`OntologyBuilder.build`、`EntityVersion` | `tests/unit/test_contracts.py` 仅验证输入 | 文件 hash / 限额已校验；无收集器、提取 Adapter、文件持久化或 Build Handler |
-| Entity / 长期 D/S 同步 | Partial | `src/pace/application/contracts.py`、`src/pace/application/services.py`；`src/pace/adapters/db/models.py` | `SyncEntityInput`、`UnconfiguredCommands.sync_entity`、`Entity` | `tests/unit/test_contracts.py`、`tests/unit/test_mcp.py` | 只有模型 / 契约；无更新、乐观锁、sync 幂等或版本发布事务 |
-| 即时 Request / connect / Match | Partial | `src/pace/application/contracts.py`、`src/pace/application/services.py`；`src/pace/adapters/db/models.py` | `ConnectInput`、`UnconfiguredCommands.connect`、`ConnectionRequest`、`Match` | `tests/unit/test_contracts.py`、`tests/unit/test_mcp.py` | 无候选查询、Request 写入、持久重放、Match / 通知原子提交 |
-| Selection / Jev Adapter | Implemented | `src/pace/application/tournament.py`；`src/pace/adapters/providers/jev.py` | `Tournament.select`、`resolve_decision`、`JevChoiceProvider.choose` | `tests/unit/test_tournament.py`、`tests/unit/test_jev_adapter.py` | 独立入口；真实模型质量、整体成本 / 延迟未验收 |
-| PostgreSQL schema / session / migration | Implemented | `src/pace/adapters/db/models.py`、`src/pace/adapters/db/session.py`；`migrations/env.py`、`migrations/versions/0001_initial_framework.py` | `Base`、`Database`、`upgrade` | `tests/integration/conftest.py`、`tests/integration/test_jobs.py` | 七张表；业务表主要只验建表，未验业务事务 |
-| 持久任务队列 / 通用 Worker | Implemented | `src/pace/adapters/db/jobs.py`；`src/pace/interfaces/worker.py` | `enqueue`、`JobQueue`、`Worker.run_once` | `tests/integration/test_jobs.py` | 至少一次执行；生产 `handlers={}`；持续 heartbeat / 丢租约路径未专项验收 |
-| Ontology / Email / Event 业务 Handler | Not implemented | `src/pace/interfaces/worker.py`（空注册表） | `run` | 无真实业务 Handler 测试 | 未注册 kind 进入有限重试 / 失败 |
-| 本地邮件捕获 | Implemented | `src/pace/adapters/delivery/capture.py` | `CaptureEmail.deliver` | `tests/unit/test_delivery.py` | 只返回 captured；不装配到生产命令 |
-| 真实 Email / MCP Events | Not implemented | `src/pace/application/contracts.py`、`src/pace/application/ports.py`；`src/pace/adapters/db/models.py`（预留结构） | `ConnectionMatched`、`EventDelivery`、`EmailDelivery`、`EventSubscription` | 无真实投递 / 订阅测试 | 无 event 触发、events/* 方法、challenge、签名、加密器或 SMTP Adapter |
-| Host / Plugin / Platform adapters | Not implemented | 无实现文件 | 无 | 无 | 无安装包、授权文件 Reader 或真实 Host 联调 |
-| 开发数据库 / doctor / demo | Implemented | `scripts/dev_db.sh`、`scripts/doctor.py`、`scripts/demo_selection.py`；`examples/selection_pool.json` | `start/stop/status`、`main`、`run` | 无脚本专用测试；本次实际运行 | fixture 固定答案；不写业务数据 |
-| 文档自动检查 | Implemented | `scripts/check_docs.py` | `check` | 实际执行通过 | 本地链接 / anchor / 围栏、CODEMAP 实现覆盖；不证明语义正确 |
+| 能力 | 状态 | 证据 / 实际边界 |
+| --- | --- | --- |
+| 固定两项 MCP Tool、真实官方 transport | Implemented | `interfaces/mcp.py`；SDK 协议测试 |
+| 持久同步及回执重放 | Implemented | `BusinessRepository.synchronize`；同键冲突、账号锁、乐观版本 |
+| 完整授权来源集 / D/S 显式更新 | Implemented | files 替换、null 不改、[] 清空；不推断 D/S |
+| Ontology 提取及只追加完成快照 | Implemented | LLM Adapter + Worker 双检版本；空文件零模型调用；来源未撤销时旧完成快照继续可用 |
+| 资格过滤 / 最新完成快照候选 | Implemented | 只用启用、已验证、已同意且 Google sub 绑定的规范 Gmail；排除自己 |
+| 四候选淘汰赛 / 明确 No Match | Implemented | Tournament + Jev；概率仅组内；错误不变成 No Match |
+| 持久 connect / Match / outbox 原子提交 | Implemented | 同键 advisory 锁、当前授权仍成立时成功重放零模型调用、失败状态可重试 |
+| 请求相关联系方式披露 | Implemented | Gmail 来自已验证账号；仅少量命中请求词的原文片段；无伪造模型理由 |
+| 任务领取、续租、有限重试与恢复 | Implemented | SKIP LOCKED、lease UUID、错误安全码；Worker 注册三种 Handler |
+| 本地私有邮件捕获 | Implemented | 原子落盘、稳定 delivery_id、内容冲突检测；状态 captured |
+| 个人 Gmail 身份规范化 / 跨 Host 同账号 | Implemented | Google sub + canonical Gmail 双唯一；跨 Host 和令牌测试 |
+| Google 浏览器 OAuth / 注册 / 同意 | Partial | 官方 MCP auth 路由、Google OIDC、cookie/state/nonce/PKCE；缺真实客户端验收 |
+| 独立 PACE opaque 凭据 / 轮换 / 撤销 | Implemented | Hash 存储、/mcp resource、client binding、一次性消费、族撤销 |
+| 系统 Gmail API 通知 | Partial | 独立 gmail.send 授权、稳定 Message-ID、失败重试；尚未真实发信 |
+| MCP Events 订阅与签名投递 | Partial | 持久归属、challenge、secret 加密/轮换、DNS 固定公网 IP、410/413 终止；缺真实 Host 接收验收 |
+| Host 授权文件收集及接入包 | Partial | `plugins/pace` 的 manifest、MCP 配置、skill 和有界显式文件 collector；未安装联调 |
+| 文档链接 / CODEMAP 覆盖检查 | Implemented | `scripts/check_docs.py`；不维护旧 catalog 指纹 |
+| 公网部署、全局限流、生产观测与保留策略 | Planned | 不由本次本地测试证明 |
 
-## Working end-to-end flows
+## 验证记录
 
-| 当前能跑通的链 | 证据与边界 |
-| --- | --- |
-| 环境 → ASGI 启动 → 运维响应 / 默认 MCP 拒绝 | `test_bootstrap.py`、`test_mcp.py`；真实监听探测验证 HTTP；有 Token 也不能完成生产业务 |
-| 注入测试身份 / 命令 → 官方 SDK discover / list / call → structured result | `test_real_sdk_discover_list_and_call_with_injected_test_ports`；仅应用边界为合成桩 |
-| 合成 JSON → EntitySnapshot → Tournament → FixtureChoice → Selection / traces | `demo_selection.py` 默认模式；候选 2、两轮三调用，不创建 Account / Match / 通知 |
-| 隔离 schema 迁移 → enqueue → claim / recover → 合成 Handler → complete | `tests/integration/test_jobs.py`；真实 PostgreSQL，Handler 无外部副作用 |
-| 合成邮件 → CaptureEmail → 私有 JSON → 同键重放 / 冲突检测 | `test_delivery.py`；本地捕获，不是对方收信 |
+当前验收：默认测试50 passed / 17 skipped；全部PostgreSQL测试67 passed。Ruff check / format check、文档检查通过。真实数据库路径对每个测试建立独立随机 schema，执行完整 Alembic 升级，再只清理自身 schema。应用数据库升级至 `0003`，`alembic check` 未发现漂移。
 
-## Known gaps
+已验收的业务场景：并发同请求只选择一次、同键不同载荷冲突、原回执重放、D/S 不被即时请求修改、模型错误留下 failed 而非 No Match、过时任务零模型调用、D/S 单独更新零 LLM、明确文件清空、通知捕获、跨 Host 身份合并、授权码不可重放、refresh 轮换旧 access 失效、撤销令牌族、订阅刷新 / 轮换 / 归属与停止投递。
 
-MVP 阻塞链为：可信 Account / Principal → 已完成 Entity Snapshot → 合格候选查询 → connect 持久化与 Selection 接线 → Match 和通知任务提交 → 实际投递。每一业务环节均缺实现，配置数据库 / Key 不会补齐。`OntologyBuilder` 无实现，OpenAI SDK 目前仅用于 doctor；没有从数据库 JSONB 转领域 Snapshot 的生产转换。Host 收集与返回后刷新也没有执行者。
+**有限真实模型验收**：只运行一次 `scripts/demo_business.py --live`，合成资料、隔离数据库 schema、临时邮件捕获。可满足请求得到 matched；Rust 硬冲突得到 no_match；connect 重放新增调用为 0。LLM 1 次：prompt 289 + completion 237 = 526 tokens；Jev 2 次：911+90、885+62 tokens，合计报告 2,474 tokens。没有实际发邮件，没有真人资料，临时 schema / 捕获目录已清理。两个合成案例只能证明接线，不证明真实匹配质量。
 
-默认 MCP 不可能发现 / 调用成功：缺 Bearer 在入口被拒绝，有 Bearer 到未配置验证器仍被拒绝。当前没有可通过环境配置启用的生产认证方案；测试注入不得当作运行步骤。
+## 运行边界与技术债
 
-## Current technical debt
+- 当前数据库为 PostgreSQL；服务不自动迁移。账号只能经 Google Gmail 验证与明确披露同意建立；合成账号仅用于测试 / demo。
+- connect 为避免并发重复模型调用，在总预算内持有数据库事务 / 同键锁。候选上限超出明确报错；尚无跨请求全局限流及全局额度封顶。
+- 候选取最新已完成版本，旧完成版本在刷新期间继续可用。模型输出保留来源标签与来源 metadata，但事实正确性没有独立自动评测保证。
+- 通知为至少一次执行。Gmail API 没有本实现可依赖的服务商幂等发送键；服务商接受后、DB 确认前崩溃可能重复邮件。稳定 Message-ID 是追踪信息，不是 exactly-once。
+- Event ID 跨重试不变；接收端须去重。无历史 replay，订阅过期期间漏掉的事件无法通过 cursor 恢复。投递前重查权限，但网络副作用不能与撤销实现数据库原子性。
+- `/readyz` 检查配置与迁移，不远程测试 Google / Gmail / 模型，不证明 Worker 活跃。需要真实身份和公网 Host 的验收后才能对外开放。
+- 没有用户自助删除 / 撤回同意工具、完整数据保留清理、生产限流 / 监控、模型质量评测集及密钥轮换运维流程。禁用账号、撤销快照所依赖的文件来源会阻止新的披露和后续通知；不自动删除历史记录。
+- Fernet 密钥必须长期私密保存；丢失无法解密既存客户端 / 订阅记录。当前密钥轮换需专门迁移，不要直接换 Key。
+- 既有历史 ADR / sources 保留原样；新 Gmail 决策只覆盖对应身份口径。
 
-| 源码位置 | 当前问题与影响 |
-| --- | --- |
-| `src/pace/bootstrap.py: Container.close` | 顺序关闭 Jev 再关闭数据库；前者抛异常时后者未由 finally 保证释放 |
-| `src/pace/interfaces/worker.py: Worker.run_once` | 忽略 `complete` / `fail` 的 False；返回 True 只表示领到任务，未提供确认失败的单独可观察状态 |
-| `src/pace/adapters/db/models.py` | Snapshot 外键不保证账号归属，历史版本无不可变约束；`updated_at` 无 onupdate；JSONB 无 MutableDict，原地修改不会自动追踪 |
-| `src/pace/adapters/delivery/capture.py` | 独占创建后直接写入，崩溃可留半写文件；重放会冲突；已有目录权限不会收紧 |
-| `src/pace/application/tournament.py`、`domain/models.py` | 并发只限制单次 select；无整体 timeout / 成本限额；trace 缺候选版本、Prompt 版本与耗时；frozen 数据对象中的 dict 仍可变 |
-| `src/pace/interfaces/mcp.py` | 入口要求两个 scope 同时存在；缺少 403 专项测试；未知异常交 SDK 处理，未建立统一安全业务包装 |
+## Next steps
 
-以上是源码可见限制和验证缺口，本次仅记录，未修改代码。
+1. 按 [DEVELOPMENT](DEVELOPMENT.md) 配置 Google Web OAuth、Fernet 与精确 Host redirect allowlist，验收同一个 Gmail 在两个 Host 的登录及撤销。
+2. 配置系统 Gmail 发信授权，用明确授权的测试收件 Gmail 验证 provider_accepted 与实际到达；目前 capture 已可用于本地开发。
+3. 部署公网 HTTPS API 与独立 Worker，修改私有接入包的 MCP 地址，验收真实 Host 工具及 Events。
+4. 在真实用户开放前补限流 / 额度总预算、撤回同意 / 数据删除、保留策略及可观察性；再做来源撤销和模型效果评测。
 
+操作命令在 [DEVELOPMENT](DEVELOPMENT.md)，组件关系在 [ARCHITECTURE](ARCHITECTURE.md)，文件导航在 [CODEMAP](CODEMAP.md)。

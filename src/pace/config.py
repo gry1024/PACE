@@ -8,8 +8,10 @@
 """Typed local configuration; credentials are never returned by API endpoints."""
 
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlsplit
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +51,48 @@ class Settings(BaseSettings):
     # 允许配置 OpenAI 兼容服务；配置存在不意味着 Ontology 已实现。
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model_name: str | None = None
+    # 显式总预算；限制候选池与模型输出，不把额度保护变成静默截断。
+    connect_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    max_candidates: int = Field(default=128, ge=1, le=1000)
+    ontology_input_bytes: int = Field(default=48000, ge=1000, le=200000)
+    ontology_max_output_tokens: int = Field(default=800, ge=64, le=4000)
+    # Google 登录仅申请 openid/email；通知从系统 Gmail 单独授权发送。
+    public_base_url: str = "http://127.0.0.1:8000"
+    google_client_id: str | None = None
+    google_client_secret: SecretStr | None = None
+    encryption_key: SecretStr | None = None
+    oauth_access_seconds: int = Field(default=3600, ge=60, le=86400)
+    oauth_refresh_seconds: int = Field(default=2592000, ge=3600)
+    oauth_redirect_allowlist: list[str] = Field(default_factory=list)
+    # capture 是明确的本地落盘通道；gmail 模式需要发件方的 refresh token。
+    email_delivery_mode: Literal["capture", "gmail"] = "capture"
+    capture_directory: str = ".local/mail"
+    gmail_sender: str | None = None
+    gmail_refresh_token: SecretStr | None = None
+    gmail_client_id: str | None = None
+    gmail_client_secret: SecretStr | None = None
+
+    @field_validator("public_base_url")
+    @classmethod
+    def valid_public_base(cls, value):
+        """issuer 必须为 HTTPS origin；仅 loopback 允许 HTTP 本地验收。"""
+        parsed = urlsplit(value)
+        if (
+            not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or (
+                parsed.scheme != "https"
+                and not (
+                    parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+                )
+            )
+        ):
+            raise ValueError("PUBLIC_BASE_URL must be an HTTPS origin or HTTP loopback origin.")
+        return value.rstrip("/")
 
 
 # 实现说明：get_settings

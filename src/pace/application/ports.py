@@ -3,7 +3,7 @@
 #
 # 使用 Python Protocol 做结构类型约束：满足方法签名的真实 Adapter / 测试桩都能注入。
 # 身份独立于 Tool 数据；选择独立于数据库；Ontology 和交付可分开实现、测试。
-# Protocol 存在不等于对应能力已完成，当前多项业务 Port 仍未接线。
+# Protocol 存在不等于外部配置可用，具体实现由 bootstrap 选择。
 
 """Dependency boundaries used by application services."""
 
@@ -12,7 +12,6 @@ from typing import Protocol
 
 from pace.application.contracts import (
     ConnectInput,
-    ConnectionMatched,
     ConnectResult,
     RequestContext,
     SourceFile,
@@ -25,7 +24,7 @@ from pace.domain.models import ChoiceDecision, EntitySnapshot, Principal
 # 实现说明：IdentityVerifier
 # 访问凭据到可信 Principal 的验证边界。
 #
-# 未来实现必须验证 Token 的 issuer、audience、有效期、scope 和账号绑定。
+# OAuth 实现验证 PACE opaque Token 的资源、有效期、scope 和已验证 Gmail 账号绑定。
 class IdentityVerifier(Protocol):
     # 实现说明：IdentityVerifier.verify
     # 校验 Bearer Token，成功才返回 Principal。
@@ -73,31 +72,31 @@ class ChoiceProvider(Protocol):
 
 
 # 实现说明：OntologyBuilder
-# 从上传文本构建 / 更新 Ontology 的能力，当前只有接口。
+# 从明确上传的完整文件集重新构建 Ontology；空集合清除，D/S 不由模型推断。
 #
 # 不能替代 Host 去读取远端文件，也不能自动把即时请求改为长期需求。
 class OntologyBuilder(Protocol):
     # 实现说明：OntologyBuilder.build
     # 接收明确上传的文件与可选旧 Snapshot，返回 Ontology 文本。
     #
-    # 具体提取、合并、来源保留和版本切换需要后续 Adapter / 用例实现。
+    # Worker 负责完成版本发布，Builder 只提取文本，不读取 Host 远端文件。
     async def build(self, files: Sequence[SourceFile], previous: EntitySnapshot | None) -> str: ...
 
 
 # 实现说明：EventDelivery
-# 向已验证订阅地址投递连接事件的能力，当前只有接口。
+# 向持久已验证订阅投递连接事件的能力，调用前再次校验权限与到期。
 #
-# 实际实现还需校验 callback、签名、到期、重试与幂等。
+# Event Adapter 校验 callback、签名、到期与撤销，Queue负责有限重试。
 class EventDelivery(Protocol):
-    # 实现说明：EventDelivery.deliver
+    # 实现说明：EventDelivery.deliver_subscription
     # 投递完整最小 Event 载荷，并报告实际通道状态。
     #
     # HTTP 接受不表示用户阅读，未配置不能返回成功。
-    async def deliver(self, callback_url: str, event: ConnectionMatched) -> str: ...
+    async def deliver_subscription(self, payload: dict) -> str: ...
 
 
 # 实现说明：EmailDelivery
-# 邮件交付边界，可由本地捕获或真实 SMTP Adapter 实现。
+# 邮件交付边界，可由本地捕获或系统 Gmail Adapter 实现。
 #
 # 交付状态要区分 captured 和 provider_accepted。
 class EmailDelivery(Protocol):

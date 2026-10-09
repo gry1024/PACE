@@ -2,7 +2,7 @@
 # HTTP 运维入口与官方 MCP transport 的生命周期挂载。
 #
 # FastAPI 路由只提供存活、就绪和公开契约；业务 Tool 由 MCP SDK 分发，不增加 REST 业务旁路。
-# 存活检查成功不代表 DB / 模型 / 账号 / 通知可用，就绪目前明确为 503。
+# 存活与依赖配置 / 迁移就绪分开；readyz 不调用付费模型或发送邮件。
 # 应用退出关闭本进程拥有的 SDK Client 和数据库 Engine。
 
 """Public operations endpoints and protected MCP mounting."""
@@ -39,35 +39,67 @@ def build_app(container: Container) -> FastAPI:
     app = FastAPI(
         title="PACE",
         version="0.1.0",
-        description="PACE framework: contracts and infrastructure, business flow pending.",
+        description="PACE Gmail identity, profile synchronization and connection backend.",
         lifespan=lifespan,
     )
     app.state.container = container
+    if container.oauth is not None:
+        from pace.interfaces.auth import auth_routes
+
+        app.router.routes.extend(auth_routes(container.oauth))
     # GET / POST / DELETE 都先经过 ProtectedMCP；具体协议方法由官方 SDK处理。
     app.router.routes.append(Route("/mcp", transport, methods=["GET", "POST", "DELETE"]))
 
     # 实现说明：build_app.healthz
-    # 仅报告当前 Python HTTP 进程存活与 framework 阶段。
+    # 仅报告当前 Python HTTP 进程存活与 mvp 阶段。
     #
     # 不读取秘密、不查询 DB，也不触发模型调用，因此不能当作完整就绪检查。
     @app.get("/healthz", tags=["operations"])
     def healthz():
-        return {"status": "ok", "service": "pace", "stage": "framework"}
+        return {"status": "ok", "service": "pace", "stage": "mvp"}
 
     # 实现说明：build_app.readyz
-    # 明确报告业务尚未准备好，始终返回 503。
+    # 检查必要配置和 DB 迁移；未满足返回 503，满足返回 200。
     #
-    # pending 列出身份、实体事务和连接交付缺口；配置 Key 存在不能令它自动变绿。
+    # ready 不代表外部凭据已验收或独立 Worker 正在运行，部署验收另行执行。
     @app.get("/readyz", tags=["operations"], status_code=503)
-    def readyz():
-        # Configured keys and a listening process are not evidence of business readiness.
+    async def readyz():
+        from sqlalchemy import text
+
+        pending = []
+        if container.oauth is None:
+            pending.append("gmail_oauth_configuration")
+        if container.choice is None:
+            pending.append("jev_configuration")
+        if container.ontology is None:
+            pending.append("llm_configuration")
+        if container.settings.email_delivery_mode != "gmail" or not all(
+            (
+                container.settings.gmail_sender,
+                container.settings.gmail_refresh_token,
+                container.settings.gmail_client_id,
+                container.settings.gmail_client_secret,
+            )
+        ):
+            pending.append("gmail_notification_configuration")
+        if container.database is None:
+            pending.append("database_configuration")
+        else:
+            try:
+                async with container.database.sessions() as session:
+                    revision = await session.scalar(text("SELECT version_num FROM alembic_version"))
+                    if revision != "0003":
+                        pending.append("database_migration")
+            except Exception:
+                pending.append("database_unavailable")
         return JSONResponse(
             {
-                "status": "not_ready",
-                "stage": "framework",
-                "pending": ["email_oauth", "entity_transactions", "connection_delivery"],
+                "status": "not_ready" if pending else "ready",
+                "stage": "mvp",
+                "email_delivery_mode": container.settings.email_delivery_mode,
+                "pending": pending,
             },
-            status_code=503,
+            status_code=503 if pending else 200,
         )
 
     # 实现说明：build_app.contracts

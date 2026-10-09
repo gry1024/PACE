@@ -152,3 +152,67 @@ def test_unconfigured_commands_report_error_instead_of_fake_match():
         result = response.json()["result"]
         assert result["isError"] is True
         assert result["structuredContent"]["error"]["code"] == "feature_unavailable"
+
+
+def test_events_extension_discovery_and_header_validation():
+    """官方SDK发现仍正常，仅隔离扩展增加events能力且没有第三项Tool。"""
+    app = create_app(Settings(_env_file=None), identity=TestIdentity(), commands=TestCommands())
+    app.state.container.events = object()
+    with TestClient(app, base_url="http://localhost") as client:
+        discovered = client.post(
+            "/mcp", headers=headers("server/discover"), json=request("server/discover")
+        )
+        assert (
+            discovered.status_code == 200
+            and "events" in discovered.json()["result"]["capabilities"]
+        )
+        listed = client.post("/mcp", headers=headers("events/list"), json=request("events/list"))
+        assert listed.status_code == 200
+        definition = listed.json()["result"]["events"][0]
+        assert definition["name"] == "connection.matched" and definition["delivery"] == ["webhook"]
+        assert "event_id" not in definition["payloadSchema"]["properties"]
+        wrong = client.post(
+            "/mcp",
+            headers=headers("events/list"),
+            json=request("events/unsubscribe", {"id": "bad"}),
+        )
+        assert wrong.json()["error"]["code"] == -32602
+        blocked = client.post(
+            "/mcp",
+            headers={**headers("events/list"), "Origin": "https://evil.example"},
+            json=request("events/list"),
+        )
+        assert blocked.status_code == 403
+
+
+def test_authenticated_mcp_rejects_untrusted_host():
+    app = create_app(Settings(_env_file=None), identity=TestIdentity(), commands=TestCommands())
+    with TestClient(app, base_url="http://evil.example") as client:
+        blocked = client.post("/mcp", headers=headers(), json=request("tools/list"))
+        assert blocked.status_code == 421
+
+
+def test_scopes_are_checked_per_tool():
+    class ConnectOnly(TestIdentity):
+        async def verify(self, bearer_token):
+            return Principal(UUID(int=100), frozenset({"pace:connect"}))
+
+    app = create_app(Settings(_env_file=None), identity=ConnectOnly(), commands=TestCommands())
+    with TestClient(app, base_url="http://localhost") as client:
+        listed = client.post("/mcp", headers=headers(), json=request("tools/list"))
+        assert listed.status_code == 200
+        called = client.post(
+            "/mcp",
+            headers=headers("tools/call", "sync_entity"),
+            json=request(
+                "tools/call",
+                {
+                    "name": "sync_entity",
+                    "arguments": {
+                        "request_id": str(UUID(int=1)),
+                        "files": [],
+                    },
+                },
+            ),
+        )
+        assert called.json()["result"]["structuredContent"]["error"]["code"] == "insufficient_scope"

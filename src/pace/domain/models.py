@@ -21,6 +21,7 @@ from uuid import UUID
 class Principal:
     user_id: UUID
     scopes: frozenset[str]
+    client_id: str = ""
 
 
 # 实现说明：EntitySnapshot

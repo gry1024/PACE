@@ -33,7 +33,7 @@ def check() -> list[str]:
                     errors.append(f"{path.relative_to(ROOT)}: missing anchor {raw}")
     codemap = (ROOT / "docs/CODEMAP.md").read_text(encoding="utf-8")
     # 有实质实现的 Python 文件必须有导航；不扫描秘密与第三方包。
-    for directory in ("src", "tests", "scripts", "migrations"):
+    for directory in ("src", "tests", "scripts", "migrations", "plugins"):
         for path in (ROOT / directory).rglob("*.py"):
             if path.name != "__init__.py" and "__pycache__" not in path.parts:
                 relative = path.relative_to(ROOT).as_posix()

@@ -1,159 +1,152 @@
 # 接口 reference
 
-只记录源码已有的接口、数据结构与默认行为。契约存在不代表业务执行已实现，完成度见 [STATUS](STATUS.md)。源码权威入口：[contracts.py](../src/pace/application/contracts.py)、[mcp.py](../src/pace/interfaces/mcp.py)、[models.py](../src/pace/adapters/db/models.py)。JSON Schema 可从 `GET /contracts` 或模型的 `model_json_schema()` 获取，不维护第二套完整 schema。
+权威定义：[contracts.py](../src/pace/application/contracts.py)、[mcp.py](../src/pace/interfaces/mcp.py)、[models.py](../src/pace/adapters/db/models.py)。完整 JSON Schema 由 GET /contracts 生成；本页只解释接口语义，完成度见 [STATUS](STATUS.md)。
 
 ## MCP Tools
 
-共同实现位置：`src/pace/interfaces/mcp.py` 的 `TOOL_CONTRACTS`、`tool_definitions`、`build_server.call_tool`。输入 / 输出全部来自 `src/pace/application/contracts.py` 的 Pydantic 模型。所有 Contract `extra=forbid`，输入不能传 `email` / `pace_user_id` 等身份字段。回调从服务端 `request.scope.state.pace_principal` 取得 Principal。
+只有 sync_entity、connect。输入 Contract extra=forbid，可信身份从服务端 Principal 取得，不能传 email / user_id。Tools 改变状态，annotations 为 readOnlyHint=false、idempotentHint=true、openWorldHint=true；sync_entity destructiveHint=true。
 
-| name | input / output | 命令入口 | side effects / errors |
-| --- | --- | --- | --- |
-| `sync_entity` | `SyncEntityInput` → `SyncEntityResult` | `BusinessCommands.sync_entity(principal, data)`；默认 `UnconfiguredCommands.sync_entity` | 当前无业务副作用，默认抛 FeatureUnavailable；输入校验可返回 invalid_input |
-| `connect` | `ConnectInput` → `ConnectResult` | `BusinessCommands.connect(principal, data)`；默认 `UnconfiguredCommands.connect` | 当前无业务副作用，默认抛 FeatureUnavailable；不调用 DB / Tournament / Delivery |
-
-Tool annotations：两者 `readOnlyHint=false`、`idempotentHint=true`、`openWorldHint=true`；`destructiveHint` 仅 sync_entity 为 true。这些是描述性提示，不能当作真实幂等重放或外部调用的证明。
-
-### sync_entity 输入
-
-| 字段 | 类型 / 默认值 | 当前校验 |
-| --- | --- | --- |
-| `request_id` | UUID，必填 | 结构校验；当前无持久 sync 幂等实现 |
-| `files` | `list[SourceFile] \| null`，默认 null | 最多 20 个；source_id 不重复；总 UTF-8 文本 ≤8 MiB；null 与 [] 保持不同值 |
-| `demand_updates` / `supply_updates` | `list[EntryUpdate]`，默认 [] | 各列表内部 entry_id 不重复，D 与 S 之间可以重复；没有数量上限 |
-| `expected_entity_version` | `int \| null`，默认 null | ≥0；尚不做事务版本判断 |
-
-至少一种明确更新：files 不能是 null 且两类 updates 同时空；显式 `files=[]` 合法。未实现替换 / 合并、空文件集业务处理、来源持久化或版本切换，不能从这一 validator 推导它们。
-
-`SourceFile` 字段：source_id（1–200 字符）、name（1–255）、text（str）、content_hash（64 位小写十六进制）、observed_at（AwareDatetime）。文件名大小写无关且只以 `.txt` / `.md` 结尾；单文件 UTF-8 文本 ≤1 MiB；content_hash 必须等于原样 text 的 SHA-256；文本没有非空限制，时间必须带时区。校验 hash 不证明 Host 已授权或内容可信。
-
-`EntryUpdate` 按 operation 区分：`upsert` = operation + UUID entry_id + text（1–10000 字符）；`remove` = operation + UUID entry_id。upsert text 没有专门的全空白拒绝，只有长度检查。
-
-`SyncEntityResult`：必填 status 固定 accepted、entity_version（int）、entity_status（building / ready / refreshing）、accepted_updates（list[str]）；job_id 为 UUID 或 null，默认 null。输出 entity_version 没有非负校验；accepted 仅为 schema 分支，默认命令不会产生它。
-
-### connect 输入输出
-
-| 输入字段 | 当前规则 |
-| --- | --- |
-| `request_id` | UUID，必填 |
-| `request_text` | str，1–10000 字符且不能全为空白；保留原文本 |
-| `context.observed_at` | AwareDatetime，必填 |
-| `context.timezone` | 必填 str，需被 `ZoneInfo` 识别为 IANA 时区 |
-| `context.location_description` | str 或 null，默认 null，最多 2000 字符 |
-
-`ConnectResult` 必填 status（matched / no_match）、request_id、entity_version；可选 connection_id、candidate、notification 默认 null；ontology_refresh 固定 `host_collection_required`。matched 必须同时含 connection_id / candidate / notification；no_match 三者必须全 null。结果模型只验证形状，不证明实体版本、Match 或任务存在。
-
-| 结果对象 | 字段 |
-| --- | --- |
-| `CandidateResult` | pace_user_id（UUID）、relevant_information（str）、email（str；没有 Email 格式 / 验证校验） |
-| `NotificationState` | event、email 均为 DeliveryState；两个通道都必须提供 |
-| `DeliveryState` | queued / not_subscribed / captured / accepted_by_receiver / provider_accepted / failed；共享枚举没有按通道进一步限制 |
-
-只有 CaptureEmail 当前能生成真实 captured 结果。queued、accepted_by_receiver、provider_accepted 等值是契约允许值，不代表存在对应执行路径；接收与服务商接受也不表示用户阅读。
-
-### Transport、成功与错误边界
-
-`ProtectedMCP` 包围 GET / POST / DELETE `/mcp`，先检查 Bearer，再调用 IdentityVerifier.verify。缺凭据返回 HTTP 401 与 `WWW-Authenticate: Bearer`；默认验证器返回 HTTP 503；验证结果需同时具有 `pace:connect`、`pace:sync`，缺任一为 HTTP 403 / insufficient_scope，发现请求也受保护。
-
-通过后使用官方 `StreamableHTTPSessionManager(stateless=True, json_response=True)`；body 上限 10 MiB（JSON 开销可能先于文件文本限额触发）。SDK负责协议错误，不与业务错误合并。`tests/unit/test_mcp.py` 验证的协议版本为 `2026-07-28`，请求包含 MCP-Protocol-Version / MCP-Method，tools/call 另带 MCP-Name；params._meta 包含 `io.modelcontextprotocol/protocolVersion` 与 `io.modelcontextprotocol/clientCapabilities`。这是锁定 SDK 的实测请求形式，不是对其他 Host 支持性的声明。
-
-回调成功：结果的 JSON 同时放入文本 content 和 structuredContent。PACE 回调错误：`isError=true`，文本和 structuredContent 均为 `{"error":{"code":"...","message":"..."}}`。ValidationError 被转换为固定 invalid_input，不回显私密正文；未知 Tool 可返回 unknown_tool，SDK 也可能先拒绝不符合协议 / schema 的请求。未知内部异常由 SDK 处理。
-
-| 错误类 / code | 声明 HTTP status | 当前触发位置 |
-| --- | --- | --- |
-| `PaceError` / internal_error | 500 | 基类；并非通用异常自动包装 |
-| `AuthenticationRequired` / authentication_required | 401 | ProtectedMCP 无有效 Bearer |
-| `FeatureUnavailable` / feature_unavailable | 503 | 默认 Identity / Commands；database_url 缺配置 |
-| `ProviderUnavailable` / provider_unavailable | 502 | Jev Adapter 捕获 TypeSafeError |
-| `InvalidSelection` / invalid_selection | 502 | Adapter 响应形状错误或 Tournament 决策校验失败 |
-| `InputTooLarge` / input_too_large | 413 | Jev SDK 调用前预算检查 |
-| `IdempotencyConflict` / idempotency_conflict | 409 | enqueue 同键不同 kind / payload |
-| invalid_input / unknown_tool | 无对应 PaceError 类 | build_server.call_tool 分支 |
-
-HTTP status 列来自 `src/pace/domain/errors.py`，只在 HTTP 层捕获使用；Tool 内 PaceError 变成 MCP isError，不据此改变 transport HTTP status。重复候选 / 自身是 Tournament 的 ValueError；Capture 冲突是 ValueError；没有 `entity_not_ready` 等旧设计中预想的错误类。
-
-## MCP Events
-
-已有唯一载荷模型 `src/pace/application/contracts.py: ConnectionMatched`：
+### sync_entity
 
 | 字段 | 类型 / 规则 |
 | --- | --- |
-| event_id | UUID，必填 |
-| type | Literal connection.matched，默认该值 |
-| occurred_at | AwareDatetime，必填 |
-| connection_id | UUID，必填 |
-| request_summary | str，必填 |
-| requester | CandidateResult，必填，包含申请方相关信息与 email |
+| request_id | 必填 UUID，同账号内稳定操作键；原载荷重试用原键 |
+| files | null 或 ≤20 个 SourceFile；null 保留，[] 清空，非空替换完整当前授权集 |
+| demand_updates / supply_updates | 默认 []；各命名空间内 entry_id 不重复 |
+| expected_entity_version | null 或 ≥0 int；提供时与当前已接受版本一致，否则 version_conflict |
 
-**触发位置：无。** 未注册 events/list、events/subscribe、events/unsubscribe，没有 Match 后生成事件、callback challenge、Webhook 签名或 Delivery Adapter。`EventSubscription` 表存在不能当作订阅 API 已实现；本节载荷没有已执行的 side effects / delivery errors。
+至少表达一个明确更新。SourceFile = source_id（1–200）、name（1–255，.txt/.md）、text、content_hash（原样 UTF-8 文本 SHA-256，64 位小写 hex）、observed_at（带时区）。单文件 ≤1 MiB，总文本 ≤8 MiB；撤销来源立即阻止含撤销来源的旧快照继续匹配/新通知披露，授权由 Host 获得，hash 不证明内容可信。LLM 输入预算另行限制，超过则构建失败而不静默裁剪。
+
+EntryUpdate 的 operation 为 upsert/remove。upsert 带 UUID entry_id 和 1–10000 字符 text；remove 只带 entry_id。D 与 S 可以用相同 ID，各自独立。未知 remove 幂等无变化，操作仍接受新版本。
+
+结果 SyncEntityResult = status:accepted、entity_version、entity_status:building/refreshing/ready、job_id（UUID/null）、accepted_updates。accepted 表示事务已经接受；job_id=null/ready 可为只改 D/S 的直接发布。重放先于预期版本检查，原回执不变。构建失败见 DB Entity.status 与 Job.error_code；目前没有第三个状态查询 Tool。
+
+### connect
+
+输入 = request_id UUID、request_text（1–10000，非全空白）、context。context 必填 observed_at（时区时间）、timezone（有效 IANA 时区）；location_description 可选 ≤2000 字符。即时请求不更新长期 D/S。
+
+输出 ConnectResult = status:matched/no_match、request_id、entity_version，ontology_refresh 固定 host_collection_required。matched 必须含 connection_id、candidate、notification；no_match 这三者为 null，不入队通知。
+
+candidate = pace_user_id、email（来自已验证规范 Gmail）、relevant_information（最多四段命中请求词的原文、总≤2000字符；无命中明确说明）。通知 event/email 独立：queued、not_subscribed、captured、accepted_by_receiver、provider_accepted、failed。queued 是实际 outbox 已提交，capture 不是真实邮件。原成功回执在双方与快照来源仍获授权时重放，不追踪后续交付状态；撤销后原历史仍保存但新的披露读取被拒绝。
+
+### Transport 与错误
+
+GET/POST/DELETE /mcp 都受 Bearer 验证；至少需一项相关scope；sync_entity需要pace:sync，connect及Events需要pace:connect。未带/失效凭据 HTTP401，WWW-Authenticate 带 protected resource metadata URL；缺配置 HTTP503；scope 不足 HTTP403。官方 StreamableHTTPSessionManager 为 stateless=True、json_response=True，body ≤10 MiB。
+
+协议为锁定 SDK 的 2026-07-28。MCP-Protocol-Version / MCP-Method 必填，tools/call 带 MCP-Name；params._meta 携带 io.modelcontextprotocol/protocolVersion 与 io.modelcontextprotocol/clientCapabilities。协议错误由 SDK处理，Host/Origin保护启用；生产只接受PUBLIC_BASE_URL，开发另接受loopback。
+
+Tool 成功同时返回文本 content 与 structuredContent；业务错误为 isError=true，内容均为 {"error":{"code":"...","message":"..."}}。输入详情、SQL、原始 Provider 异常不回显。HTTP status 只用于认证等 HTTP 边界；Tool 内错误不会按此改变 transport status。
+
+| code | HTTP 声明 | 含义 |
+| --- | --- | --- |
+| authentication_required | 401 | 无有效 PACE bearer |
+| account_unavailable | 403 | 非 Gmail、未验证 / 未同意 / 禁用账号 |
+| feature_unavailable | 503 | 必要能力缺配置 |
+| entity_not_ready | 409 | 请求者没有完成快照 |
+| version_conflict | 409 | 当前 Entity 版本变化 |
+| idempotency_conflict | 409 | 同键不同有效载荷 |
+| input_too_large | 413 | Provider 输入预算超限 |
+| selection_limit | 503 | 候选 / 总耗时预算不足 |
+| provider_unavailable / invalid_selection | 502 | Provider 故障 / 选择无效，不是 No Match |
+| delivery_unavailable / delivery_terminal | 502 | 通知失败 / 不再重试 |
+| invalid_input / unknown_tool | Tool 错误 | 契约或名称不合法 |
+| internal_error | 500 / Tool 错误 | 未分类内部故障，安全固定消息 |
+
+## Gmail OAuth
+
+当数据库、GOOGLE_CLIENT_ID、GOOGLE_CLIENT_SECRET、ENCRYPTION_KEY 都配置时挂载。SDK处理 OAuth 协议；Google callback 才创建账号，没有匿名 email 注册入口。
+
+| 路径 | 方法 / 作用 |
+| --- | --- |
+| /.well-known/oauth-authorization-server | GET，PACE issuer/端点/scope metadata |
+| /.well-known/oauth-protected-resource/mcp | GET，/mcp 的资源 metadata |
+| /register | POST，动态客户端注册；精确 redirect allowlist，开发 loopback 例外 |
+| /authorize | GET/POST，SDK验证客户端、redirect、scope、PKCE；跳 PACE 同意页 |
+| /token | POST，授权码 / refresh 交换，绑定客户端；原子一次性消费 / 轮换 |
+| /revoke | POST，撤销相关 token family |
+| /auth/consent | GET/POST，注册披露与 Gmail 通知同意；flow cookie 防跨流程提交 |
+| /auth/google/callback | GET，Google code/state 回跳；验证 Gmail 与 sub，签发 PACE code 回 Host |
+
+Google 只申请 openid/email，不读邮件；同意版本 gmail-connections-v1。只支持 @gmail.com，dot/plus 规范化，签名 sub 双唯一。拒绝其它域、未验证邮箱、冲突身份或禁用账号。Google token 不能用于 /mcp；PACE access/refresh 是 opaque 值，Hash 持久化，resource 固定 issuer/mcp。access 默认1小时，refresh默认30天；码2分钟，flow10分钟。refresh轮换后旧access也失效。请求 nonce、issuer/audience/expiry 验证与 Cookie 绑定不省略。
+
+注册允许 none/client_secret_basic/client_secret_post；client secret 加密保存。生产精确 OAuth redirect URI 由 OAUTH_REDIRECT_ALLOWLIST 配置，不默认信任任意 HTTPS。客户端要使用完整两项业务应申请 pace:sync pace:connect；refresh可缩减scope，不能提升权限。
+
+## MCP Events
+
+当数据库与 Fernet Key 配置时启用，受同一 MCP身份边界保护。只有 connection.matched，空 arguments schema，无 replay。发现 capabilities.events={}；扩展层不增加业务 Tool。
+
+| method | 主要 params | 结果 |
+| --- | --- | --- |
+| events/list | params._meta；无过滤 | events 列表含 name/description/delivery/inputSchema/payloadSchema |
+| events/subscribe | name:connection.matched、arguments:{}、delivery:{mode:webhook,url,secret}、cursor:null、可选 ttlMs | id、refreshBefore、cursor:null、truncated:false |
+| events/unsubscribe | id（订阅UUID） | {}；只操作当前 account/client，重复停止幂等 |
+
+secret 必须 whsec_ 加合法 base64，解码24–64 bytes。callback 仅公网 HTTPS443、无凭据/fragment，DNS 校验每次连接执行，固定已验证IP并保留TLS hostname，禁重定向。challenge 验证后才激活。同身份/目标/事件/参数稳定ID刷新；默认及最长期限24小时，ttlMs=null仍授予有限期限。有效且相同secret的challenge最多缓存5分钟，换secret重新验证；旧/新secret双签5分钟。
+
+验证 body = {"type":"verification","challenge":"..."}；响应必须2xx并回显相同challenge。错误为 JSON-RPC -32015 CallbackEndpointError，data.reason 分类，不带url/secret详情；参数错误 -32602。订阅输入上限16KiB，必须当前协议及匹配MCP-Method；带Origin时只允许服务origin。
+
+实际投递 envelope：
+```json
+{
+  "eventId": "stable UUID",
+  "name": "connection.matched",
+  "timestamp": "timezone-aware occurrence time",
+  "data": {
+    "connection_id": "UUID",
+    "request_summary": "instant request summary",
+    "requester": {
+      "pace_user_id": "UUID",
+      "email": "verified@gmail.com",
+      "relevant_information": "limited relevant excerpt"
+    }
+  },
+  "cursor": null
+}
+```
+
+webhook-id 与 eventId 一致，webhook-timestamp / webhook-signature 使用 Standard Webhooks，另有 X-MCP-Subscription-Id。完整body≤256KiB，响应≤8KiB，网络10秒；2xx表示接收端接受而非用户阅读；410/413撤销/终止、不重试，其它错误有限退避。事件发生时间/ID重试不变，签名时间更新。
 
 ## HTTP/API
 
-实现位置 `src/pace/interfaces/http.py: build_app`；HTTP 无业务 REST 旁路。
-
-| method / path | 当前 response / 行为 |
+| method/path | 响应 |
 | --- | --- |
-| GET `/healthz` | 200：`{"status":"ok","service":"pace","stage":"framework"}`；不探测依赖 |
-| GET `/readyz` | 固定 503：status=not_ready、stage=framework、pending=[email_oauth, entity_transactions, connection_delivery] |
-| GET `/contracts` | 200：version=0.1.0、business_tools，按两项契约返回 input / output JSON Schema；不包含 Event schema |
-| GET / POST / DELETE `/mcp` | 先身份保护，再官方 Streamable HTTP；POST 发现 / 调用经过 SDK 测试；三种方法默认 401 / 503 均经实际监听验证 |
-| GET `/docs`、`/redoc`、`/openapi.json` | FastAPI 默认文档；MCP 的 ASGI Route 不等同 REST 业务 schema |
+| GET /healthz | 200，status:ok、service:pace、stage:mvp；仅进程存活 |
+| GET /readyz | 配置/DB revision不足503，否则200；stage:mvp、email_delivery_mode、pending；不测试付费模型/真实邮件/Worker心跳 |
+| GET /contracts | 公开两个Tool的Pydantic input/output Schema |
+| /docs、/redoc、/openapi.json | FastAPI 运维文档，不是另一个业务接口 |
+| /mcp | 认证后官方Tools或隔离Events扩展 |
+| OAuth 路径 | 见上一节；缺配置不挂载 |
 
-这些端点没有上传 / 登录 / Email 验证 API。公开端点不返回凭据或用户数据。
+## Database 与内部能力
 
-## Database
+迁移 head=0003；不自动create_all，ORM无relationships。JSON内部关联仍由业务用例验证，无历史不可变Trigger。
 
-权威源码：`src/pace/adapters/db/models.py`；初始迁移 `migrations/versions/0001_initial_framework.py`，revision=0001。六张业务表加 jobs；alembic_version 由工具维护。无 ORM relationship、无自动 create_all。
+| table | 关键约束 / 用途 |
+| --- | --- |
+| accounts | id UUID、canonical email唯一、google_subject唯一、verified/consent/enabled/host_bindings |
+| entities | account_id PK/FK、version≥0、building/ready/refreshing/failed、完整files、O/D/S、更新时间 |
+| entity_versions | 账号/version唯一且>0；完成snapshot、来源metadata、model/prompt |
+| sync_receipts | account/request_id唯一；payload_hash+原结果 |
+| connection_requests | account/request_id唯一；完成snapshot引用、原请求、trace、结果/失败码 |
+| matches | request唯一，双方不同；联系人快照、两个通道状态、每订阅event_deliveries |
+| event_subscriptions | account/client/subscription_key唯一；回调、密文secret、期限/验证/撤销 |
+| oauth_records | Hash/prefix key；kind、payload、可选账号/期限；clientsecret/verifier在sealed密文 |
+| jobs | dedupe_key唯一；queued/running/completed/failed、attempts/限额、lease UUID/截止、错误/完成时间 |
 
-| model / table | 主要字段与意义 | 关系 / 硬约束 |
-| --- | --- | --- |
-| Account / accounts | id 稳定账号键；email；email_verified_at；consent_version / consented_at；enabled 默认 false；host_bindings JSONB | email 唯一；无 Email 规范化或 bindings 内容校验 |
-| Entity / entities | account_id 当前实体键；version；status；ontology JSONB、demands / supplies JSONB；updated_at | account_id 同时 PK / accounts FK；version≥0；status=building / ready / refreshing / failed |
-| EntityVersion / entity_versions | id；account_id；version；snapshot JSONB；sources；model / prompt_version | account_id → accounts；(account_id, version) 唯一，version>0；无历史不可变 Trigger |
-| ConnectionRequest / connection_requests | id 内部键；account_id；request_id 客户端键；payload_hash / payload；snapshot_id；status / result / selection_trace / error_code | account_id → accounts，snapshot_id → entity_versions；(account_id, request_id) 唯一；status=pending / matched / no_match / failed |
-| Match / matches | id；request_id 内部 Request 键；requester_id / candidate_id；candidate_snapshot_id；contact_snapshot；event_status / email_status | request_id → connection_requests 且唯一；双方 → accounts 且不同；candidate_snapshot_id → entity_versions；通道状态是未加 Check 的字符串 |
-| EventSubscription / event_subscriptions | id / account_id；client_id / subscription_key；event_type；callback_url；signing_secret_ciphertext；expires_at / verified_at / revoked_at | account_id → accounts；(account_id, client_id, subscription_key) 唯一；无 callback 验证 / secret 加密实现 |
-| Job / jobs | id；kind；dedupe_key；payload；status / attempts / max_attempts；available_at；lease_id / lease_until；error_code / completed_at | dedupe_key 全表唯一；status=queued / running / completed / failed；attempts≥0，max_attempts>0；(status, available_at) poll 索引，无业务 FK |
+内部 Ports 在 application/ports.py；PersistentCommands通过BusinessStore访问事务；Tournament只依赖ChoiceProvider。Worker注入OntologyBuilder、EmailDelivery和EventDelivery，具体服务由bootstrap装配。
 
-全部模型含 created_at，数据库 `now()` 默认；updated_at 仅插入默认，不自动随更新变化。UUID / JSON 默认多数为 ORM Python default，直接 SQL 插入不能依赖这些 server defaults。JSONB 内部内容与 Snapshot 归属、请求所有者和 Match requester 一致性没有 DB 约束。
+enqueue 不提交；同键同kind/payload重放，否则冲突。claim 原子 SKIP LOCKED；renew/complete/fail 仅当前未过期lease有效。fail 支持terminal=True；否则有限重试，退避 min(300,2**min(attempts,8)) 秒。未知kind错误handler_not_configured；未知Handler异常handler_failed；已分类错误保存安全业务code。run_once 返回领过任务与否，不代表完成。
 
-### JobQueue 内部持久接口
+## 外部服务
 
-实现 `src/pace/adapters/db/jobs.py`；执行者 `src/pace/interfaces/worker.py`。
+| Adapter | timeout / budget / 状态 |
+| --- | --- |
+| JevChoiceProvider | 官方TypeSafe SDK，单调用默认20秒、自动重试0、输入24000字节；Provider故障与无效选择分别报错 |
+| LLMOntologyBuilder | 官方兼容OpenAI SDK，配置model/baseURL、默认20秒、自动重试0；输入48000字节，输出800tokens；非stop/空输出拒绝 |
+| GoogleOAuth | Authlib token交换15秒；Google官方ID Token验证器，证书抓取10秒；只验证Gmail |
+| GmailEmail | 独立gmail.send授权；refresh15秒/最多一次刷新，send20秒；provider_accepted不保证实际到达，崩溃重试可重复 |
+| EventWebhooks | DNS5秒、请求10秒、无环境代理/重定向、固定公网IP+SNI；签名/挑战/轮换 |
+| CaptureEmail | 私有目录0700、文件0600、UUIDdelivery_id、原子独占落盘；同ID不同内容ValueError |
+| PostgreSQL | SQLAlchemy asyncio/psycopg，pool_pre_ping；业务/租约事务；连接/查询失败不伪装成功 |
 
-| symbol | 输入 / 输出 | side effects / errors |
-| --- | --- | --- |
-| `enqueue(session, kind, dedupe_key, payload, max_attempts=3)` | AsyncSession + str / dict → UUID | 不 commit；同键同 kind / payload 返回旧 ID，不重置任务；不同则 IdempotencyConflict；max_attempts 不参与冲突检查 |
-| `JobQueue.claim()` | 无 → Job 或 None | 事务内终止耗尽租约，领取 eligible Job；attempts +1，新 lease UUID / deadline；数据库错误向上传播 |
-| `renew(job)` | Job → bool | 仅 id + running + 同 lease + 未过期才延长；False 表示失去占有权 |
-| `complete(job)` | Job → bool | 同条件，置 completed / completed_at，清租约 |
-| `fail(job, error_code)` | Job + code → bool | 有尝试剩余置 queued，否则 failed；code 截到 100 字符；清租约，延后 available_at |
-| `Worker.run_once()` | 无 → bool | None 返回 False；领过返回 True；未知 kind=handler_not_configured，Handler 异常=handler_failed；不表示投递完成 |
-
-claim 按 available_at / id 排序，用 SKIP LOCKED。租约到期且耗尽任务记录 lease_exhausted。fail 退避为 `min(300, 2 ** min(attempts, 8))` 秒；按当前整数表达式实际最大为 256 秒。续租周期为 lease_seconds / 3；完整租约与副作用边界见 [ARCHITECTURE](ARCHITECTURE.md#队列与通用-worker)。
-
-## 内部能力 Port
-
-定义于 `src/pace/application/ports.py`，Protocol 不执行持久化或网络。
-
-| Port / method | 输入 → 输出 | 具体实现 / 调用者 |
-| --- | --- | --- |
-| IdentityVerifier.verify | bearer_token → Principal | 默认 UnconfiguredIdentity；ProtectedMCP 调用 |
-| BusinessCommands.sync_entity / connect | Principal + 对应 input → 对应 result | 默认 UnconfiguredCommands；MCP 回调调用 |
-| ChoiceProvider.choose | requester Snapshot、request_text、Sequence[Snapshot]、可选 context → ChoiceDecision | JevChoiceProvider、合成 fixture；Tournament 调用 |
-| OntologyBuilder.build | Sequence[SourceFile]、previous Snapshot 或 None → str | 无 Adapter / 生产调用者 |
-| EventDelivery.deliver | callback_url、ConnectionMatched → str | 无实现 / 调用者 |
-| EmailDelivery.deliver | recipient、subject、body、delivery_id → str | CaptureEmail；当前仅测试调用 |
-
-## External services
-
-| service / 调用位置 | 用途与输入输出边界 | timeout / retry / error behavior |
-| --- | --- | --- |
-| TypeSafe / Jev：`src/pace/adapters/providers/jev.py: JevChoiceProvider` | `AsyncTypeSafeClient.system_one(state, questions={match: Choice})`；state 含 request / requester / candidates，criteria=各 UUID + no_match；输出 choice / probabilities / confidence / model / usage | timeout 来自配置（默认20秒），RetryPolicy(max_retries=0)；默认 24000 字节 JSON 预算，超限 InputTooLarge；TypeSafeError → ProviderUnavailable；KeyError / TypeError / AttributeError / ValueError → InvalidSelection；概率合法性由 Tournament 校验 |
-| TypeSafe / Jev：`scripts/doctor.py: check_providers.jev` | 固定合成 badminton / chess / no_match，输出状态、choice、model 和观测耗时 | 固定20秒、重试0；预期 badminton，否则 unexpected_selection；捕获列出的 SDK / API / DB / ValueError 类并只公开类型 |
-| OpenAI 兼容服务：`scripts/doctor.py: check_providers.llm` | `AsyncOpenAI.chat.completions.create`；合成单词请求、max_completion_tokens=16；仅检查非空回答 | 固定30秒、max_retries=0；需 Key 与 model；错误输出类型；没有 Ontology Prompt / Adapter |
-| PostgreSQL：`src/pace/adapters/db/session.py`、`migrations/env.py` | SQLAlchemy asyncio / psycopg；Engine pool_pre_ping，迁移使用 NullPool | 应用未配置自定义 DB timeout / retry；SQL 错误一般向上传播；doctor 单独 connect_timeout=5 |
-| Email provider / Webhook receiver | 无调用位置 | 无真实 timeout / retry / 签名 / error 策略 |
-
-Jev 的预算计数使用默认 json.dumps（包含 ASCII 转义），统计 state + criteria + instructions 的 UTF-8 字节，不是精确 token 计数或最终 HTTP body 上限。默认模型来自 Settings 的 `jev-1.13.0`。API 只构造可选 Client，实际业务命令目前不调用它；live demo 才走真实选择请求。
-
-`CaptureEmail.deliver` 不访问外部服务，使用调用者目录下 `<UUID>.json`；新目录 0700、新文件 0600；同 ID 内容一致返回 captured，不一致抛 ValueError，其他文件 IO 错误向上传播。
+配置与实际运行命令见 [DEVELOPMENT](DEVELOPMENT.md)。

@@ -3,11 +3,13 @@
 #
 # 使用稳定 UUID 文件名保存邮件，返回 captured 而不是 provider_accepted。
 # 不调用 SMTP / HTTP，也不打印收件地址或正文；捕获目录应放被忽略的私有位置。
-# 写入不是生产级原子邮件发送，崩溃半写文件可能在重试时被检测为冲突。
+# 临时文件写完并 fsync 后独占原子发布；本地捕获不代表真实发送。
 
 """Private local capture, explicitly not real email delivery."""
 
 import json
+import os
+import tempfile
 from pathlib import Path
 from uuid import UUID
 
@@ -29,7 +31,7 @@ class CaptureEmail:
     #
     # 先规范化 UUID，防止任意路径注入；独占创建避免重试覆盖已有内容。
     # 新目录0700、新文件0600；已有目录权限不会自动收紧。
-    # 同ID内容相同返回captured，内容不同报冲突，不自动修复 / 覆盖半写文件。
+    # 同ID内容相同返回captured，内容不同报冲突，不覆盖既有内容。
     async def deliver(self, recipient: str, subject: str, body: str, delivery_id: str) -> str:
         # 只允许规范 UUID 文件名，不能使用包含斜杠或上级目录的任意字符串。
         safe_id = str(UUID(delivery_id))
@@ -40,13 +42,25 @@ class CaptureEmail:
         )
         # Exclusive create gives local retry deduplication. Conflicting input fails.
         # 独占创建保留首个交付内容；本地捕获的重复调用应幂等。
+        # 先完成私有临时文件并 fsync，再原子独占链接，崩溃不留下半写的交付文件。
+        descriptor, temporary = tempfile.mkstemp(prefix=".mail-", dir=self.directory)
         try:
-            with path.open("x", encoding="utf-8") as stream:
-                path.chmod(0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
                 stream.write(payload)
-        # 已经捕获时比较完整内容；仅相同 ID还不够，不能掩盖不同载荷。
-        except FileExistsError:
-            if path.read_text(encoding="utf-8") != payload:
-                raise ValueError("Capture delivery ID has conflicting content.") from None
+                stream.flush()
+                os.fsync(stream.fileno())
+            try:
+                os.link(temporary, path)
+                if hasattr(os, "O_DIRECTORY"):
+                    directory_fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+            except FileExistsError:
+                if path.read_text(encoding="utf-8") != payload:
+                    raise ValueError("Capture delivery ID has conflicting content.") from None
+        finally:
+            Path(temporary).unlink(missing_ok=True)
         # 这是开发捕获状态，绝不能改写为真实服务商接受或用户已读。
         return "captured"

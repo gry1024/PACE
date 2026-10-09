@@ -11,14 +11,14 @@ from pace.main import create_app
 
 
 # 实现说明：test_liveness_does_not_claim_business_readiness
-# 验证存活200 /framework与业务就绪503可以同时成立。
+# 验证存活200 /mvp与未配置业务就绪503可以同时成立。
 #
 # 使用TestClient上下文触发生命周期，确保退出释放测试应用资源。
 def test_liveness_does_not_claim_business_readiness():
     with TestClient(create_app(Settings(_env_file=None))) as client:
         response = client.get("/healthz")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok", "service": "pace", "stage": "framework"}
+        assert response.json() == {"status": "ok", "service": "pace", "stage": "mvp"}
         assert client.get("/readyz").status_code == 503
 
 

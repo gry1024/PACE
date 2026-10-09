@@ -1,12 +1,12 @@
 # 模块说明
-# MVP 六张业务表及持久 jobs 基础设施表的 SQLAlchemy 映射。
+# MVP 业务表、同步回执、OAuth 状态与持久 jobs 的 SQLAlchemy 映射。
 #
 # 这些结构与迁移负责对象存在、唯一键、部分状态和值域，不代表业务用例已完成。
 # 授权、Snapshot 归属、只追加历史、JSON 内部结构与幂等重放仍需用例检查。
 # 多数 UUID / JSON 默认值是 Python ORM default，直接 SQL INSERT 不能假设它们都有服务端默认。
-# 不得仅因字段名含 ciphertext 就宣称已加密；当前没有 secret 加密器。
+# OAuth 与 webhook secret 通过 Fernet 加密；Key 在外部环境配置中。
 
-"""Six business tables plus the infrastructure jobs table; Alembic owns schema changes."""
+"""Business and infrastructure tables; Alembic owns schema changes."""
 
 from datetime import datetime
 from typing import Any
@@ -47,13 +47,15 @@ class Timestamped:
 # 实现说明：Account
 # 稳定用户账号与注册连接授权的持久结构。
 #
-# Email 唯一，但规范化 / Email 验证 / 授权流程未接线；enabled 默认 false。
+# Gmail 唯一与 Google sub 唯一；验证与披露同意由 Google callback 写入。
 class Account(Timestamped, Base):
     __tablename__ = "accounts"
     # 内部稳定主键，由 ORM 生成 UUID；不是用户可以指定来获取他人对象的凭据。
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    # 已规范化 / 验证的注册 Email 应由未来账号流程写入；此列只保证唯一。
+    # 由 Google 验证后写入规范 Gmail；本列另保证唯一。
     email: Mapped[str] = mapped_column(String(320), unique=True)
+    # Google 验证的稳定 sub；跨 Host 不依赖各平台临时用户 ID。
+    google_subject: Mapped[str | None] = mapped_column(String(255), unique=True)
     # 真实验证成功时间；字段存在本身不能证明验证流程已运行。
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # 记录注册时披露联系方式 / 通知授权的说明版本，便于追踪同意口径。
@@ -69,7 +71,7 @@ class Account(Timestamped, Base):
 # 实现说明：Entity
 # 每个账号至多一条当前 Entity：O / D / S、状态与版本。
 #
-# 版本切换和旧任务保护尚需事务实现；updated_at 当前不自动随更新改变。
+# 同步事务维护版本与 updated_at；Worker 双检版本拒绝过时任务。
 class Entity(Timestamped, Base):
     __tablename__ = "entities"
     __table_args__ = (
@@ -90,14 +92,16 @@ class Entity(Timestamped, Base):
     demands: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
     # 只存明确长期 Supply；选择允许 Demand↔Demand，不强制供需单向配对。
     supplies: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
-    # 当前只有插入默认时间，没有 onupdate；未来更新事务需主动维护。
+    # 当前授权文件集合；files=None 保留，files=[] 明确清空。
+    files: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default="[]")
+    # 插入默认时间；同步和发布事务主动维护更新时间。
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # 实现说明：EntityVersion
 # 历史已完成 Snapshot 与来源 / 模型元数据。
 #
-# 同账号版本号唯一，version>0；当前没有不可变 Trigger，未来用例必须只追加。
+# 同账号版本号唯一，version>0；当前无不可变 Trigger，业务用例只追加。
 class EntityVersion(Timestamped, Base):
     __tablename__ = "entity_versions"
     __table_args__ = (
@@ -146,7 +150,7 @@ class ConnectionRequest(Timestamped, Base):
     snapshot_id: Mapped[UUID] = mapped_column(ForeignKey("entity_versions.id"))
     # 对象生命周期状态；数据库 CheckConstraint 限定部分合法值，不自动执行状态转换。
     status: Mapped[str] = mapped_column(String(20), default="pending")
-    # 已提交结果用于未来幂等重放；当前业务写入尚未接线。
+    # 保存已提交的原始幂等结果，不随通知状态变动重新生成。
     result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # 分组诊断数据，组内概率不能作为全局成功率。
     selection_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
@@ -177,6 +181,10 @@ class Match(Timestamped, Base):
     contact_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
     # Event 通道独立状态；不能用邮件成功覆写 Event 失败。
     event_status: Mapped[str] = mapped_column(String(30), default="queued")
+    # 每个订阅独立交付状态，聚合后不能让另一订阅成功掩盖失败。
+    event_deliveries: Mapped[dict[str, str]] = mapped_column(
+        JSONB, default=dict, server_default="{}"
+    )
     # Email 通道独立状态；queued / provider_accepted 不等于已读。
     email_status: Mapped[str] = mapped_column(String(30), default="queued")
 
@@ -184,7 +192,7 @@ class Match(Timestamped, Base):
 # 实现说明：EventSubscription
 # 持久化事件订阅、验证和过期 / 撤销信息。
 #
-# 回调公网校验、challenge、加密secret、签名和所有者权限尚未实现。
+# EventWebhooks 实施公网固定 IP、challenge、加密、签名与 account/client 归属校验。
 class EventSubscription(Timestamped, Base):
     __tablename__ = "event_subscriptions"
     __table_args__ = (
@@ -200,9 +208,9 @@ class EventSubscription(Timestamped, Base):
     subscription_key: Mapped[str] = mapped_column(String(200))
     # 当前冻结业务事件只有 connection.matched。
     event_type: Mapped[str] = mapped_column(String(100), default="connection.matched")
-    # 未来必须经过公网 HTTPS 与 SSRF 检查；字符串列本身没有安全验证。
+    # Adapter 对 challenge 和投递均实施公网 HTTPS / SSRF 校验。
     callback_url: Mapped[str] = mapped_column(String(2048))
-    # 仅预留密文存储字段，尚未有加密器 / 密钥管理，不能写成已完成加密。
+    # Fernet 密文，包含当前 / 短期轮换旧 secret；密钥不写入数据库。
     signing_secret_ciphertext: Mapped[str] = mapped_column(String)
     # 订阅有效期；Worker 投递前需校验，没有自动删除逻辑。
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -251,3 +259,26 @@ class Job(Timestamped, Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
     # 成功确认时间；只在持有有效租约时写入。
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SyncReceipt(Timestamped, Base):
+    """同步操作的持久幂等回执；原结果重放不再次更新或调用模型。"""
+
+    __tablename__ = "sync_receipts"
+    __table_args__ = (UniqueConstraint("account_id", "request_id", name="uq_sync_receipt"),)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"))
+    request_id: Mapped[UUID] = mapped_column()
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB)
+
+
+class OAuthRecord(Timestamped, Base):
+    """OAuth 短期状态 / 令牌 / 客户端记录；Bearer 和 code 的 key 只存 SHA-256。"""
+
+    __tablename__ = "oauth_records"
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    account_id: Mapped[UUID | None] = mapped_column(ForeignKey("accounts.id"), index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)

@@ -2,7 +2,7 @@
 # PACE 的通用四候选淘汰赛，不依赖数据库或模型 SDK。
 #
 # 请求者 Snapshot 在所有轮次保持不变；每组最多四个真实候选并始终带 no_match。
-# 候选资格查询由未来 connect 用例负责，本模块只拒绝自身和重复 ID。
+# 候选资格查询由持久 connect 用例负责，本模块只拒绝自身和重复 ID。
 # 诊断概率仅属于当前组；上游失败或无效选择不能变成 No Match。
 
 """Four-way elimination with explicit No Match and reproducible diagnostics."""

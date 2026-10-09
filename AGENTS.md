@@ -6,6 +6,8 @@ PACE 是平台无关的 Personal Agent Connection Backend，通过 MCP 暴露业
 
 Python 要求 `>=3.12`，`.python-version` 选择 3.12；依赖由 `uv.lock` 锁定。当前锁定：FastAPI 0.142.2、MCP 2.3.0、TypeSafe SDK 0.7.2、OpenAI SDK 3.26.0、SQLAlchemy 2.1.3、psycopg 3.3.6、Alembic 1.20.0、Pydantic 2.13.5、pydantic-settings 2.15.0、uvicorn 0.54.0；pytest 9.1.1、Ruff 0.16.10。依赖变更时同步此处，以 manifest / lockfile 为准。
 
+身份依赖：Authlib 1.8.0、google-auth 2.61.0、cryptography 50.0.2、Standard Webhooks 1.1.0；精确版本以 lockfile 为准。只接受经过 Google 验证的个人 Gmail，与 Google sub 双唯一关联；跨 Host 使用相同 Account。通知地址也只能来自已验证 Gmail，不接受 Tool 传入的邮箱作为身份。
+
 ## Commands
 
 在 Linux / WSL 仓库根目录执行；Windows 使用 `wsl -d Ubuntu-22.04 --cd /home/groy/pace -- bash -lc '命令'`，避免 UNC cwd 被 shell 丢弃。
@@ -23,6 +25,8 @@ uv run alembic upgrade head
 PACE_TEST_DATABASE=1 uv run pytest -q
 uv run alembic check
 uv run python scripts/doctor.py --database
+uv run python scripts/demo_business.py
+uv run python scripts/check_docs.py
 ```
 
 其他运行、诊断与文档验证命令见 [DEVELOPMENT](docs/DEVELOPMENT.md)。

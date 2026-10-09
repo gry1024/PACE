@@ -2,17 +2,20 @@
 # 官方 MCP Python SDK 的 Tool 定义、命令分发与身份保护边界。
 #
 # 使用 Server / StreamableHTTPSessionManager，不自写 JSON-RPC、协议发现或 HTTP 会话。
-# 业务只公开 sync_entity、connect；OpenAI webhook events/* 扩展尚未实现。
+# 业务只公开 sync_entity、connect；隔离层扩展 webhook events/*。
 # 身份与 scope 在整个 MCP HTTP 入口验证，测试身份只能通过明确的测试装配注入。
 
 """Official SDK Streamable HTTP transport; exactly two business tools."""
 
 import json
+from urllib.parse import urlsplit
 
 from mcp import types
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.server.transport_security import TransportSecurityMiddleware, TransportSecuritySettings
 from pydantic import ValidationError
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from pace.application.contracts import (
@@ -35,7 +38,7 @@ TOOL_CONTRACTS = {
 # 由唯一契约映射生成官方 SDK Tool 对象。
 #
 # 输入 / 输出 Schema 均来自 Pydantic；两项操作会改变状态并可能访问外部世界。
-# sync_entity 允许 remove，因此 destructiveHint=True；幂等标记表达契约目标，业务重放待实现。
+# sync_entity 允许 remove，因此 destructiveHint=True；持久用例实现同身份 / 同请求键重放。
 def tool_definitions() -> list[types.Tool]:
     descriptions = {
         "sync_entity": "Sync authorized TXT/Markdown and explicit long-term D/S updates.",
@@ -85,9 +88,14 @@ def build_server(container: Container) -> Server:
             principal = context.request.scope["state"]["pace_principal"]
             if params.name not in TOOL_CONTRACTS:
                 return error_result("unknown_tool", "Unknown business tool.")
+            required_scope = "pace:sync" if params.name == "sync_entity" else "pace:connect"
+            if required_scope not in principal.scopes:
+                return error_result(
+                    "insufficient_scope", "The tool requires an additional PACE scope."
+                )
             input_model, _ = TOOL_CONTRACTS[params.name]
             data = input_model.model_validate(params.arguments or {})
-            # 只对已登记名称分发；当前默认命令明确抛 FeatureUnavailable。
+            # 只对已登记名称分发；缺数据库时命令明确抛 FeatureUnavailable。
             result = await getattr(container.commands, params.name)(principal, data)
             payload = result.model_dump(mode="json")
             return types.CallToolResult(
@@ -98,11 +106,16 @@ def build_server(container: Container) -> Server:
             return error_result("invalid_input", "Input does not satisfy the tool contract.")
         except PaceError as exc:
             return error_result(exc.code, exc.public_message)
+        except Exception:
+            # SQL / SDK 原始异常可能带私有正文，不能作为 MCP 错误文本回显。
+            return error_result("internal_error", "The PACE operation could not be completed.")
 
     return Server(
         "pace",
         version="0.1.0",
-        instructions="PACE framework. Business commands and OAuth are not implemented yet.",
+        instructions=(
+            "PACE Gmail connections. Use only explicitly authorized files and D/S updates."
+        ),
         on_list_tools=list_tools,
         on_call_tool=call_tool,
         get_tool_input_schema=lambda name: (
@@ -127,7 +140,7 @@ def error_result(code: str, message: str) -> types.CallToolResult:
 # 实现说明：ProtectedMCP
 # 包围官方 transport 的最小身份 / 权限校验层。
 #
-# 这不是完整 OAuth 服务；默认验证器未接线，任意 Token 不会自动获得可信账号。
+# OAuth 服务由独立 Adapter 与官方路由提供；本类拒绝未经验证的凭据。
 class ProtectedMCP:
     """Authentication covers initialize, discovery and calls; no development bypass."""
 
@@ -137,17 +150,26 @@ class ProtectedMCP:
     # json_response 便于结构化结果；body 最大 10 MiB，JSON 编码开销可能先于文本上限触发。
     def __init__(self, container: Container):
         self.container = container
+        origin = container.settings.public_base_url
+        hosts = [urlsplit(origin).netloc]
+        origins = [origin]
+        if container.settings.app_env == "development":
+            hosts.extend(["localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]:*"])
+            origins.extend(["http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*"])
+        security = TransportSecuritySettings(allowed_hosts=hosts, allowed_origins=origins)
+        self.security = TransportSecurityMiddleware(security)
         self.manager = StreamableHTTPSessionManager(
             build_server(container),
             stateless=True,
             json_response=True,
             max_request_body_size=10 * 1024 * 1024,
+            security_settings=security,
         )
 
     # 实现说明：ProtectedMCP.__call__
     # 所有 MCP HTTP 方法在进入 SDK 前都要通过凭据和 scope 校验。
     #
-    # 无 Bearer 为 401；默认验证器为 503；缺少任一 pace:connect / pace:sync 为 403。
+    # 无 Bearer 为 401；默认验证器为 503；缺全部相关 scope 为 403，Tool / Event 分别检查所需 scope。
     # 成功后只将 Principal 放入服务端 scope.state，再调用 SDK 的 ASGI 处理。
     # Token 不写响应或日志，401 通过 WWW-Authenticate 提示客户端认证。
     async def __call__(self, scope, receive, send):
@@ -159,8 +181,8 @@ class ProtectedMCP:
             if scheme.lower() != "bearer" or not token.strip():
                 raise AuthenticationRequired()
             principal = await self.container.identity.verify(token)
-            # 当前入口要求两项 scope 同时存在；更细的逐 Tool 授权属于后续 OAuth 设计。
-            if not {"pace:connect", "pace:sync"}.issubset(principal.scopes):
+            # 发现只要求一项相关 scope；具体 Tool / Event 再检查自己的权限。
+            if not {"pace:connect", "pace:sync"}.intersection(principal.scopes):
                 response = JSONResponse(
                     {"error": {"code": "insufficient_scope", "message": "PACE scopes required."}},
                     status_code=403,
@@ -173,8 +195,46 @@ class ProtectedMCP:
             response = JSONResponse(
                 {"error": {"code": exc.code, "message": exc.public_message}},
                 status_code=exc.status_code,
-                headers={"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None,
+                headers={
+                    "WWW-Authenticate": (
+                        'Bearer resource_metadata="'
+                        + self.container.settings.public_base_url
+                        + '/.well-known/oauth-protected-resource/mcp"'
+                    )
+                }
+                if exc.status_code == 401
+                else None,
             )
             await response(scope, receive, send)
             return
+        if self.container.events is not None:
+            from pace.interfaces.events import METHODS, discovery_sender, handle_event_request
+
+            method = headers.get(b"mcp-method", b"").decode("latin-1")
+            if method in METHODS:
+                if "pace:connect" not in principal.scopes:
+                    await JSONResponse({"error": {"code": "insufficient_scope"}}, status_code=403)(
+                        scope,
+                        receive,
+                        send,
+                    )
+                    return
+                rejection = await self.security.validate_request(
+                    Request(scope, receive),
+                    is_post=scope["method"] == "POST",
+                )
+                if rejection:
+                    await rejection(scope, receive, send)
+                    return
+                await handle_event_request(
+                    scope,
+                    receive,
+                    send,
+                    principal,
+                    self.container.events,
+                    self.container.settings.public_base_url,
+                )
+                return
+            if method == "server/discover":
+                send = discovery_sender(send)
         await self.manager.handle_request(scope, receive, send)

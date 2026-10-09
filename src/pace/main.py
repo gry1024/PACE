@@ -17,7 +17,7 @@ from pace.interfaces.http import build_app
 # 构造一个具有独立 Container 和生命周期的 ASGI 应用。
 #
 # settings 缺省时使用缓存配置；identity / commands 是供测试或明确装配使用的 Port。
-# 生产入口不传这两个替代实现，因此仍会拒绝未验证身份和未接线业务。
+# 生产入口按配置装配真实依赖，拒绝未验证身份和缺配置的能力。
 # 函数只装配，不迁移数据库、不触发模型调用、不创建用户或匹配。
 def create_app(
     settings: Settings | None = None,
