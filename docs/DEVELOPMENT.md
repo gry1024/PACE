@@ -41,7 +41,7 @@ wsl -d Ubuntu-22.04 --cd /home/groy/pace -- bash -lc 'uv sync --locked'
 | PUBLIC_BASE_URL | http://127.0.0.1:8000 | HTTPS origin，HTTP仅loopback；固定issuer与/mcp resource |
 | GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET | 未配置 | Google Web OAuth，仅openid/email |
 | ENCRYPTION_KEY | 未配置 | 长期Fernet密钥；clientsecret/verifier/webhooksecret密文 |
-| OAUTH_REDIRECT_ALLOWLIST | []，JSON精确URI列表 | 受信任Host精确回跳或受限callback_id模板；开发环境另允许HTTP loopback |
+| OAUTH_REDIRECT_ALLOWLIST | []，JSON精确URI / 受限callback_id模板列表 | 受信任Host精确回跳或受限callback_id模板；开发环境另允许HTTP loopback |
 | OAUTH_ACCESS_SECONDS / OAUTH_REFRESH_SECONDS | 3600 / 2592000 | access与refresh有效期，轮换旧族立即失效 |
 | EMAIL_DELIVERY_MODE / CAPTURE_DIRECTORY | capture / .local/mail | 本地捕获或gmail；不接受其它模式 |
 | GMAIL_SENDER | 未配置，个人Gmail | 独立系统发件账号 |

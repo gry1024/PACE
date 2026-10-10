@@ -6,7 +6,7 @@
 
 阶段：**初期公网基础设施已部署；Google 用户登录与真实 Host 闭环尚未验收**。PA 直接整理完整 O/D/S，安装初始化一次，此后只在每次连接前同步；同步立即 ready，connect 绑定版本，后端仅用 Jev Matching。Worker 只投递 MCP Events 和 Gmail；无后端 Ontology LLM、定时画像同步、A-to-A 或不支持事件平台适配。
 
-目标为 ChatGPT Work 网页 / 桌面 Cloud 与 dots 的原生事件能力。Google Gmail OAuth、系统 Gmail、MCP Events 已有代码和离线边界验证；**真人 Google 登录、真实 Gmail 收件、平台 Events 实际触发 PA、插件安装仍未验收；公网首页 / 健康检查及独立数据库迁移已验收**。安装引导存在不代表平台任务已自动创建，一次授权无逐次确认的体验仍受 Host 权限限制。
+目标为 ChatGPT Work 网页 / 桌面 Cloud 与 dots 的原生事件能力。Google Gmail OAuth、系统 Gmail、MCP Events 已有代码和离线边界验证；**自定义 MCP 插件创建成功；真人 Google 登录、真实 Gmail 收件、平台 Events 实际触发 PA、接入包 skill 安装仍未验收；公网首页 / 健康检查及独立数据库迁移已验收**。安装引导存在不代表平台任务已自动创建，一次授权无逐次确认的体验仍受 Host 权限限制。
 
 原私有 env / 凭据保留，后端忽略旧 OPENAI_* / ONTOLOGY_*。本地数据库可用；系统 Gmail 发件凭据已写入私有配置并通过本地读取校验；Google 用户登录客户端已配置，公网 origin 为 https://clawcrony.com；真人登录与 Host 回跳仍待验收，见 [人工清单](MVP_SETUP_CHECKLIST.md)。当前 EMAIL_DELIVERY_MODE=capture，不会真实发送邮件。
 
@@ -31,20 +31,20 @@ Implemented = 实现与相应本地验证路径存在；Partial = 实现存在�
 | PACE opaque 凭据 / 轮换 / 撤销 | Implemented | Hash / resource / client binding；一次性授权码、refresh 轮换、族撤销 |
 | 系统 Gmail API 通知 | Partial | 独立 gmail.send 授权；稳定 Message-ID，真实发信 / 收件未验收 |
 | MCP Events 回调与订阅 | Partial | challenge、Standard Webhooks、归属、加密 / 轮换、DNS 安全、官方复合参数退订、过期 / 410 / 413；真实 Host 接收与 PA 运行未验收 |
-| 插件安装引导 / PA 连接 skill | Partial | portable manifest、DCR / scopes、onboarding skill、初始记忆整理 / 原生监控；未实际安装 |
+| 插件安装引导 / PA 连接 skill | Partial | 自定义 MCP 插件创建成功；接入包 skill 安装、初始记忆整理 / 原生监控仍未验收 |
 | 文档链接 / CODEMAP 检查 | Implemented | check_docs.py；当前源码导航、文档和唯一私有人工操作表已同步 |
 | 初期公网部署 | Partial | HTTPS 页面 / healthz、API / Worker / 独立 PG 已运行，迁移 0003 与 alembic check 通过；登录 / Host / 双通知待验收 |
 | 全局限流 / 费用 / 观测 / 删除保留 | Planned | 尚需配置和实现，初期部署不证明生产运营就绪 |
 
 ## 验证记录
 
-本轮默认测试 **51 passed / 20 skipped**，启用真实 PostgreSQL 后 **71 passed**。数据库用例各自建立随机 pace_test_* schema，执行完整 Alembic 升级，只清理自身 schema；Provider、Google claims 与公网接收器仍使用离线桩。真实数据库 `alembic check` 无漂移，schema head 保持 0003。Ruff check / format、git diff --check 与文档检查通过。
+当前默认测试 **51 passed / 22 skipped**，启用真实 PostgreSQL 后 **73 passed**。数据库用例各自建立随机 pace_test_* schema，执行完整 Alembic 升级，只清理自身 schema；Provider、Google claims 与公网接收器仍使用离线桩。真实数据库 `alembic check` 无漂移，schema head 保持 0003。Ruff check / format、git diff --check 与文档检查通过。
 
 覆盖：完整画像即时发布、并发同键同步、内容不变、明确清空、旧格式 / 旧同意排除、stale connect 零 Provider 调用、同请求并发选择一次、幂等冲突、失败后重试、即时 Request 不写 D/S、撤销 / 旧快照阻止披露、有无 / 过期事件订阅过滤、多订阅失败不被成功掩盖、事件失败仍投递邮件、跨 Host 同账号、PKCE / 授权码重放保护、凭据轮换 / 撤销、官方退订参数。
 
 `demo_business.py` 在独立随机 PostgreSQL schema 用合成 PA 画像直接 sync → connect → 重放 → Worker：matched 与硬冲突 no_match 均通过，重放额外调用 0；两次离线 Jev 桩调用、后端 LLM 0、真实邮件 / webhook 0。订阅与 Events 接收使用离线桩，邮件为本地 capture，临时 schema / 文件已清理；不证明真实匹配质量。
 
-历史记录：2026-10-09 曾在旧文件 / 后端构建协议下做有限真实模型合成闭环（1 LLM + 2 Jev）。该路径已移除，不能作为当前 PA 直接输入或真实 Host 的验收。本轮没有新调用付费 Provider、发送真实通知、发布或部署。
+历史记录：2026-10-09 曾在旧文件 / 后端构建协议下做有限真实模型合成闭环（1 LLM + 2 Jev）。该路径已移除，不能作为当前 PA 直接输入或真实 Host 的验收。当前 PA 直接输入路径没有新调用付费 Provider 或发送真实通知；公网基础设施部署记录见下方日志。
 
 ## 配置与外部验收进度日志
 
@@ -53,7 +53,7 @@ Implemented = 实现与相应本地验证路径存在；Partial = 实现存在�
 - 用户已创建 PACE Google Cloud 项目，设置品牌名称、支持 / 联系邮箱，选择 External + Testing，并加入两个测试 Gmail。
 - 已创建独立 Web OAuth 客户端 PACE Gmail Sender，回调使用 OAuth Playground；用户完成 gmail.send 授权，Google 换取令牌返回 HTTP 200。
 - 发件邮箱、客户端 ID / secret、refresh token 已保存到被 Git 忽略的私有配置及唯一人工表；本地 Settings 校验四项读取成功。公开文档不记录凭据或令牌。
-- Google 返回 refresh_token_expires_in=604799，当前测试令牌约于 2026-10-17 到期。用户选择暂缓品牌公开页面与生产状态切换；到期后如仍在 Testing，需要重新授权。正式配置应补齐真实首页 / 隐私政策等信息，处理适用审核要求，再获取新令牌；不把每周手动授权作为正式运行方案。
+- Google 返回 refresh_token_expires_in=604799，当前测试令牌约于 2026-10-17 到期。当时用户选择暂缓品牌公开页面与生产状态切换；公开页面此后已部署，Google 生产状态切换仍未完成。到期后如仍在 Testing，需要重新授权。正式配置应补齐真实首页 / 隐私政策等信息，处理适用审核要求，再获取新令牌；不把每周手动授权作为正式运行方案。
 - 当前仍为 capture；未启动真实发件验收，不证明 Gmail API 投递或收件成功。Google 登录客户端此后已配置（见下方接入日志），注册登录仍未验收。
 - 私有表已提供初期阿里云服务器信息及 Work 插件入口说明；已通过 SSH 只读核对服务器：Docker / Compose / Nginx 可用，系统 Python 为 3.10（PACE 要求 >=3.12），约有 24GB 磁盘可用；80/443 与现有数据库已有其他服务使用，sudo 需要密码。未修改服务器、未部署 PACE，平台原生 Events 与 PA 运行未验收。部署须使用独立目录 / 数据库与兼容 Python 的运行环境；公网域名及 HTTPS 路由待确定。用户已明确授权本轮最多 2 次 Jev 调用、1 封真实邮件，收件人为私有表中测试用户2；本次授权尚未使用，超额停止。
 
@@ -76,7 +76,7 @@ Implemented = 实现与相应本地验证路径存在；Partial = 实现存在�
 
 - 用户确认填写公网 /mcp、选择 OAuth，未填 Google 客户端到插件表单。公网 TLS 链及指定 protected-resource / OAuth metadata 可读取；未认证 MCP=401 属于正常授权挑战。
 - 重现确定阻塞：DCR 向官方 ChatGPT 回跳注册返回 400 invalid_redirect_uri，因为部署回跳白名单为空。新增显式受限 callback_id 模板（[ADR 0005](decisions/0005-oauth-callback-id-templates.md)），注册仍保存精确 URI，禁止域名 / 任意路径通配。
-- 相关真实 PostgreSQL 集成测试 6 passed，包含动态注册持久化及危险回跳拒绝；Google / Host 真实登录尚未验收。修复已部署，API / Worker 已重建；公网可信 ChatGPT 动态格式注册=201，伪装域名注册=400，healthz=200。实际平台重试结果待确认，不能把此阻塞的修复当成插件验证已全部通过。
+- 相关真实 PostgreSQL 集成测试 6 passed，包含动态注册持久化及危险回跳拒绝；Google / Host 真实登录尚未验收。修复已部署，API / Worker 已重建；公网可信 ChatGPT 动态格式注册=201，伪装域名注册=400，healthz=200。用户随后确认自定义 MCP 插件创建成功，后续 Google 登录仍失败（见下一节）；创建成功不代表完整 Host 闭环通过。
 
 ### 2026-10-10：插件创建成功后的 Google 登录排查
 
@@ -94,10 +94,15 @@ Implemented = 实现与相应本地验证路径存在；Partial = 实现存在�
 
 ### 2026-10-10：开发收尾与版本保存
 
-- GitHub 仓库当前为 Public。用户确认今日开发结束，授权提交并推送今天的代码 / 文档到现有 `codex/gmail-mvp` 分支，不改变仓库可见性或合并到 main。
+- GitHub 仓库当前为 Public。用户确认今日开发结束，授权提交并推送今天的代码 / 文档到现有 `codex/gmail-mvp` 分支；该次已推送 d960bdb，未改变仓库可见性，当时尚未合并到 main。
 - 后续每次开发结束经用户确认后执行验证、秘密排除、commit / push；约定保存在 AGENTS.md。服务器保留部署副本，不要求安装 Git；私有配置与数据库不进入版本库。
 - 收尾验证：真实 PostgreSQL 测试73 passed，Ruff check / format、文档13份及 diff 空白检查通过；Google / Provider / 事件接收仍为离线桩。
 - Google 出网阻塞仍待新服务器解决；本次收尾不购买服务器，不增加真实 Provider 调用或通知，不表示外部闭环已验收。
+
+### 2026-10-10：合并 main 前的一致性核对
+
+- 对照实际 Tool 契约、同步持久化 / 版本绑定、候选订阅资格、双通知任务、OAuth 路由、装配与部署文件核对当前文档。修正当前测试数、插件创建状态和已配置回跳后的下一步；历史 ADR / 来源快照保留。
+- 当前 Google 登录 / Gmail / 平台事件仍未完成真实验收，不能把离线桩或已部署接口记为外部闭环通过。用户已明确授权在一致性核对通过后合并到 main 并推送。
 
 ## 数据与运行边界
 
@@ -113,8 +118,8 @@ Implemented = 实现与相应本地验证路径存在；Partial = 实现存在�
 
 ## Next steps
 
-1. 填写私有 `.local/MVP_HANDOFF.md`；Google Web OAuth、稳定密钥、系统 Gmail 授权与公网 origin 已配置；继续核对目标 Host 实际 redirect。所有具体人工步骤与填写格都在该文件的一张表中；系统发件第6–7行已完成，继续核对 Work 运行入口与第8行联调额度，第5行登录客户端及公网部署现已完成基础接入；[入口说明](MVP_SETUP_CHECKLIST.md) 不再含公开空表。
-2. 已启动 HTTPS API / Worker / PostgreSQL；补齐 Host 精确回跳白名单，再验收首个 Work Cloud 用户的注册 / 持续授权、安装初始画像、事件监控、连接前同步与 Jev 匹配。
+1. 按唯一私有 `.local/MVP_HANDOFF.md` 跟进；登录 / 发件客户端、公网 origin 和 ChatGPT DCR 回跳配置已就绪，自定义 MCP 插件创建成功。当前主要阻塞是服务器访问 Google 超时；建议购买新加坡服务器，先测 Google 连通性，再迁移与切换域名，尚未购买或执行迁移。所有人工操作和填写格只维护在该表中；[入口说明](MVP_SETUP_CHECKLIST.md) 不含公开空表。
+2. 网络阻塞解决后，验收首个 Work Cloud 用户的 Google 登录 / 持续授权、接入包 skill 安装、初始画像、事件监控、连接前同步与 Jev 匹配。系统 Gmail 当前为 capture；真实邮件验收前需切换 gmail 并重启 Worker，Testing 令牌到期 / 转生产后的授权按表处理。
 3. 在明确额度内验收 Events 实际触发被匹配者 PA 通知本人，且 Gmail 实际到达；再在 dots 验证同契约 / 跨 Host 同 Gmail。缺平台权限不算完整闭环，不扩建不支持平台的适配。
 4. 面向真人开放前完成全局费用 / 限流、数据删除 / 保留、观测 / 运维与匹配评测；公开分发再核对 Google / Host 审核与政策页面。
 
