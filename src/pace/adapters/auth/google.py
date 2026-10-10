@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -32,10 +33,23 @@ from pace.adapters.db.business import advisory_lock, require_account
 from pace.adapters.db.models import Account, OAuthRecord
 from pace.domain.errors import AccountUnavailable, AuthenticationRequired
 from pace.domain.gmail import canonical_gmail
-from pace.domain.models import Principal
+from pace.domain.models import CONSENT_VERSION, Principal
 
 SCOPES = ["pace:sync", "pace:connect"]
-CONSENT_VERSION = "gmail-connections-v1"
+
+
+def allowed_redirect(target, allowlist):
+    """仅允许精确 URI 或显式配置的单段 callback_id；不允许域名 / 任意路径通配。"""
+    if target in allowlist:
+        return True
+    for template in allowlist:
+        if template.endswith("/{callback_id}"):
+            prefix = template.removesuffix("{callback_id}")
+            if target.startswith(prefix) and re.fullmatch(
+                r"[A-Za-z0-9_-]{1,128}", target[len(prefix) :]
+            ):
+                return True
+    return False
 
 
 def verified_id_token(raw, audience):
@@ -81,7 +95,7 @@ class GoogleOAuth(OAuthAuthorizationServerProvider):
         )
 
     async def register_client(self, client):
-        """DCR 仅允许配置的精确 Host 回跳地址或开发环境 loopback。"""
+        """DCR 限制配置的回跳地址 / 单段 ID 模板，或开发环境 loopback。"""
         if not client.redirect_uris or len(client.redirect_uris) > 10:
             raise RegistrationError("invalid_redirect_uri", "Registered redirects required.")
         for uri in client.redirect_uris:
@@ -93,7 +107,10 @@ class GoogleOAuth(OAuthAuthorizationServerProvider):
                 and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
             )
             if (
-                (not loopback and target not in self.settings.oauth_redirect_allowlist)
+                (
+                    not loopback
+                    and not allowed_redirect(target, self.settings.oauth_redirect_allowlist)
+                )
                 or parsed.fragment
                 or parsed.username
                 or parsed.password

@@ -58,7 +58,7 @@ class Account(Timestamped, Base):
     google_subject: Mapped[str | None] = mapped_column(String(255), unique=True)
     # 真实验证成功时间；字段存在本身不能证明验证流程已运行。
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # 记录注册时披露联系方式 / 通知授权的说明版本，便于追踪同意口径。
+    # 记录初始持续 PA 上传 / 匹配 / 披露 / 双通知授权的说明版本，便于追踪同意口径。
     consent_version: Mapped[str | None] = mapped_column(String(50))
     # 一次性注册连接授权时间；后续候选查询须明确要求已授权。
     consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -71,7 +71,7 @@ class Account(Timestamped, Base):
 # 实现说明：Entity
 # 每个账号至多一条当前 Entity：O / D / S、状态与版本。
 #
-# 同步事务维护版本与 updated_at；Worker 双检版本拒绝过时任务。
+# 同步事务直接发布完整快照并维护版本与 updated_at；Worker 只处理通知。
 class Entity(Timestamped, Base):
     __tablename__ = "entities"
     __table_args__ = (
@@ -86,20 +86,20 @@ class Entity(Timestamped, Base):
     version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # 对象生命周期状态；数据库 CheckConstraint 限定部分合法值，不自动执行状态转换。
     status: Mapped[str] = mapped_column(String(20), default="building")
-    # 当前本体以 JSONB 保存；领域 Snapshot 的文本表示转换尚待接线。
+    # PA 提供的原样文本以 {text: ...} JSONB 保存。
     ontology: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     # 只存明确长期 Demand，不允许即时 Request 自动追加。
-    demands: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    demands: Mapped[list[str]] = mapped_column(JSONB, default=list)
     # 只存明确长期 Supply；选择允许 Demand↔Demand，不强制供需单向配对。
-    supplies: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
-    # 当前授权文件集合；files=None 保留，files=[] 明确清空。
+    supplies: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    # 旧上传协议的历史原文列，仅兼容历史 schema；新同步不读写此列。
     files: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default="[]")
     # 插入默认时间；同步和发布事务主动维护更新时间。
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 # 实现说明：EntityVersion
-# 历史已完成 Snapshot 与来源 / 模型元数据。
+# 历史已完成 O/D/S Snapshot；来源 / 模型元数据列仅保留旧协议兼容。
 #
 # 同账号版本号唯一，version>0；当前无不可变 Trigger，业务用例只追加。
 class EntityVersion(Timestamped, Base):
@@ -114,13 +114,13 @@ class EntityVersion(Timestamped, Base):
     account_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id"), index=True)
     # 实体版本号；唯一性 / 值域不等于已经实现乐观锁或版本发布事务。
     version: Mapped[int] = mapped_column(Integer)
-    # 已完成的 O / D / S 快照内容；历史应只追加而非原地改写。
+    # 已完成的 O / D / S 快照内容；pa-entity-v1 由 PA 直接提供，历史只追加。
     snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
-    # 提取来源与证据追踪，不能把未知 / 矛盾事实伪装成确定事实。
+    # 旧提取协议的来源元数据；新 PA 快照为空，不伪造远端来源证明。
     sources: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
-    # 生成快照使用的真实模型标识，用于后续评测与回溯。
+    # 历史后端提炼模型标识；PA 直接发布时为 None，不声明使用了后端模型。
     model: Mapped[str | None] = mapped_column(String(100))
-    # 生成规则版本；与模型版本分别记录，避免 Prompt 改动不可追溯。
+    # 画像格式 / 历史生成规则版本；与模型版本分别记录，避免 Prompt 改动不可追溯。
     prompt_version: Mapped[str | None] = mapped_column(String(50))
 
 

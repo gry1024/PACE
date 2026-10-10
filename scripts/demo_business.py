@@ -1,13 +1,12 @@
-# 模块说明：隔离 PostgreSQL 合成闭环，--live 最多一次 LLM + 两次 Jev；只捕获邮件。
+# 模块说明：隔离 PostgreSQL 合成闭环，--live 最多两次 Jev，后端零 LLM；只捕获邮件。
 """Exercise sync, ontology publication, connect replay and private capture in an isolated schema."""
 
 import argparse
 import asyncio
-import hashlib
 import json
 import re
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,25 +18,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from pace.adapters.db.business import BusinessRepository
 from pace.adapters.db.handlers import BusinessHandlers
 from pace.adapters.db.jobs import JobQueue
-from pace.adapters.db.models import Account, Job, Match
+from pace.adapters.db.models import Account, EventSubscription, Match
 from pace.adapters.db.session import database_url
 from pace.adapters.delivery.capture import CaptureEmail
 from pace.adapters.providers.jev import JevChoiceProvider
-from pace.adapters.providers.ontology import LLMOntologyBuilder
 from pace.application.business import PersistentCommands
-from pace.application.contracts import ConnectInput, SourceFile, SyncEntityInput
+from pace.application.contracts import ConnectInput, SyncEntityInput
 from pace.application.tournament import Tournament
 from pace.config import Settings
 from pace.domain.errors import PaceError
-from pace.domain.models import ChoiceDecision, Principal
+from pace.domain.models import CONSENT_VERSION, ChoiceDecision, Principal
 from pace.interfaces.worker import Worker
-
-
-class OfflineOntology:
-    model = "fixture"
-
-    async def build(self, files, previous):
-        return "\n".join(f"[{f.source_id}] {f.text}" for f in files)
 
 
 class CountedChoice:
@@ -72,10 +63,14 @@ async def demo(sessions, live, settings, directory):
         if live
         else None
     )
-    builder = LLMOntologyBuilder(settings) if live else OfflineOntology()
     choice = CountedChoice(real)
     service = PersistentCommands(BusinessRepository(sessions), Tournament(choice))
-    handlers = BusinessHandlers(sessions, builder, CaptureEmail(directory))
+
+    class OfflineEvents:
+        async def deliver_subscription(self, payload):
+            return "accepted_by_receiver"
+
+    handlers = BusinessHandlers(sessions, email=CaptureEmail(directory), events=OfflineEvents())
     worker = Worker(JobQueue(sessions), handlers.registry())
     try:
         principals = []
@@ -87,36 +82,40 @@ async def demo(sessions, live, settings, directory):
                     enabled=True,
                     email_verified_at=datetime.now(UTC),
                     consented_at=datetime.now(UTC),
-                    consent_version="synthetic-only",
+                    consent_version=CONSENT_VERSION,
                     host_bindings=[],
                 )
                 session.add(row)
                 await session.flush()
                 principals.append(Principal(row.id, frozenset({"pace:sync", "pace:connect"})))
+                # 演示仅模拟 Host 订阅 / 接收，不对公网发送或冒充真实平台验收。
+                session.add(
+                    EventSubscription(
+                        account_id=row.id,
+                        client_id="demo-host",
+                        subscription_key=str(uuid4()),
+                        callback_url="https://receiver.example/hook",
+                        signing_secret_ciphertext="synthetic",
+                        verified_at=datetime.now(UTC),
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                    )
+                )
         profile = (
             "I teach Python to beginners remotely. Available 2026-10-10 10:00-11:00 "
             "Asia/Shanghai. I do not teach Rust. This is a synthetic test profile."
         )
-        file = SourceFile(
-            source_id="synthetic",
-            name="synthetic.md",
-            text=profile,
-            content_hash=hashlib.sha256(profile.encode()).hexdigest(),
-            observed_at=datetime.now(UTC),
-        )
-        # 请求者空来源零 LLM；候选单份很小来源一次 LLM。
-        for principal, files in zip(principals, ([], [file]), strict=True):
-            data = SyncEntityInput(request_id=uuid4(), files=files)
+        # PA 完整画像同步立即可用，不需要 Worker，也不会调用后端 LLM。
+        version = None
+        for principal, ontology in zip(principals, ("Python beginner", profile), strict=True):
+            data = SyncEntityInput(request_id=uuid4(), ontology=ontology, demands=[], supplies=[])
             accepted = await service.sync_entity(principal, data)
             assert await service.sync_entity(principal, data) == accepted
-            assert await worker.run_once()
-            async with sessions() as session:
-                job = await session.get(Job, accepted.job_id)
-                if job.status != "completed":
-                    raise RuntimeError("Ontology demo did not complete.")
+            assert accepted.entity_status == "ready"
+            version = accepted.entity_version
         context = {"observed_at": datetime.now(UTC), "timezone": "Asia/Shanghai"}
         wanted = ConnectInput(
             request_id=uuid4(),
+            entity_version=version,
             request_text=(
                 "Find a Python beginner teacher for a remote lesson on 2026-10-10 "
                 "10:00-11:00 Asia/Shanghai."
@@ -130,6 +129,7 @@ async def demo(sessions, live, settings, directory):
             principals[0],
             ConnectInput(
                 request_id=uuid4(),
+                entity_version=version,
                 request_text="I need a Rust teacher; Python teaching is not acceptable.",
                 context=context,
             ),
@@ -145,24 +145,21 @@ async def demo(sessions, live, settings, directory):
             "hard_conflict_status": mismatch.status,
             "replay_extra_calls": 0,
             "jev_calls": choice.calls,
-            "llm_calls": int(live),
-            "llm_usage": getattr(builder, "last_usage", {}),
+            "backend_llm_calls": 0,
             "jev_usage": choice.usage,
             "notification_states": captured,
             "expected_cases_passed": match.status == "matched" and mismatch.status == "no_match",
             "actual_emails_sent": 0,
+            "actual_webhooks_sent": 0,
         }
     finally:
         if real:
             await real.close()
-            await builder.close()
 
 
 async def run(live):
     settings = Settings()
-    if live and not all(
-        (settings.jev_api_key, settings.openai_api_key, settings.openai_model_name)
-    ):
+    if live and not settings.jev_api_key:
         print(json.dumps({"error": "provider_configuration_missing"}))
         return 1
     schema = "pace_demo_" + uuid4().hex
@@ -203,5 +200,7 @@ async def run(live):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--live", action="store_true", help="At most one LLM and two Jev calls.")
+    parser.add_argument(
+        "--live", action="store_true", help="At most two Jev calls; no backend LLM."
+    )
     raise SystemExit(asyncio.run(run(parser.parse_args().live)))

@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 
-from pace.application.contracts import ConnectResult
+from pace.application.contracts import ConnectResult, SyncEntityResult
 from pace.config import Settings
 from pace.domain.models import Principal
 from pace.main import create_app
@@ -42,8 +42,13 @@ class TestCommands:
     # 断言实际收到可信Principal，再构造形状合法的合成No Match。
     #
     # 请求ID沿用输入，便于检查SDK结构化返回与命令之间的接线。
+    async def sync_entity(self, principal, data):
+        """协议测试桩返回直接发布回执，持久事务另由 PostgreSQL 用例验证。"""
+        assert data.ontology == "Synthetic profile" and principal.user_id == UUID(int=100)
+        return SyncEntityResult(status="accepted", entity_version=1, changed=True)
+
     async def connect(self, principal, data):
-        assert principal.user_id == UUID(int=100)
+        assert principal.user_id == UUID(int=100) and data.entity_version == 1
         return ConnectResult(status="no_match", request_id=data.request_id, entity_version=1)
 
 
@@ -108,6 +113,25 @@ def test_real_sdk_discover_list_and_call_with_injected_test_ports():
         tools = listed.json()["result"]["tools"]
         assert {tool["name"] for tool in tools} == {"sync_entity", "connect"}
         assert all(tool["annotations"]["readOnlyHint"] is False for tool in tools)
+        synced = client.post(
+            "/mcp",
+            headers=headers("tools/call", "sync_entity"),
+            json=request(
+                "tools/call",
+                {
+                    "name": "sync_entity",
+                    "arguments": {
+                        "request_id": str(UUID(int=2)),
+                        "ontology": "Synthetic profile",
+                        "demands": [],
+                        "supplies": [],
+                    },
+                },
+            ),
+        ).json()["result"]
+        assert synced["isError"] is False
+        assert synced["structuredContent"]["entity_status"] == "ready"
+        assert "job_id" not in synced["structuredContent"]
         called = client.post(
             "/mcp",
             headers=headers("tools/call", "connect"),
@@ -118,6 +142,7 @@ def test_real_sdk_discover_list_and_call_with_injected_test_ports():
                     "arguments": {
                         "request_id": str(UUID(int=1)),
                         "request_text": "Synthetic request",
+                        "entity_version": 1,
                         "context": {
                             "observed_at": "2026-10-07T12:00:00Z",
                             "timezone": "Asia/Shanghai",
@@ -145,7 +170,12 @@ def test_unconfigured_commands_report_error_instead_of_fake_match():
                 "tools/call",
                 {
                     "name": "sync_entity",
-                    "arguments": {"request_id": str(UUID(int=1)), "files": []},
+                    "arguments": {
+                        "request_id": str(UUID(int=1)),
+                        "ontology": "Synthetic profile",
+                        "demands": [],
+                        "supplies": [],
+                    },
                 },
             ),
         )
@@ -210,9 +240,38 @@ def test_scopes_are_checked_per_tool():
                     "name": "sync_entity",
                     "arguments": {
                         "request_id": str(UUID(int=1)),
-                        "files": [],
+                        "ontology": "Synthetic profile",
+                        "demands": [],
+                        "supplies": [],
                     },
                 },
             ),
         )
         assert called.json()["result"]["structuredContent"]["error"]["code"] == "insufficient_scope"
+
+
+def test_official_unsubscribe_parameters_reach_adapter():
+    """协议退订使用复合参数；不要求 Host 发送私有 UUID 字段。"""
+
+    class Events:
+        async def unsubscribe(self, principal, params):
+            assert params["name"] == "connection.matched"
+            assert params["delivery"]["url"] == "https://receiver.example/hook"
+            return {}
+
+    app = create_app(Settings(_env_file=None), identity=TestIdentity(), commands=TestCommands())
+    app.state.container.events = Events()
+    with TestClient(app, base_url="http://localhost") as client:
+        response = client.post(
+            "/mcp",
+            headers=headers("events/unsubscribe"),
+            json=request(
+                "events/unsubscribe",
+                {
+                    "name": "connection.matched",
+                    "arguments": {},
+                    "delivery": {"mode": "webhook", "url": "https://receiver.example/hook"},
+                },
+            ),
+        )
+        assert response.json()["result"] == {}

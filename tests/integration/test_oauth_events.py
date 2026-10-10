@@ -6,8 +6,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from cryptography.fernet import Fernet
-from mcp.server.auth.provider import AuthorizationParams, TokenError
+from mcp.server.auth.provider import AuthorizationParams, RegistrationError, TokenError
 from mcp.shared.auth import OAuthClientInformationFull
+from pydantic import AnyUrl
 from sqlalchemy import func, select
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -93,6 +94,34 @@ async def test_cross_host_identity_rotation_revocation_and_one_time_code(session
     assert await provider.verify(two.access_token) == second
 
 
+async def test_production_registration_bounds_dynamic_host_callback(sessions):
+    config = settings()
+    config.app_env = "production"
+    config.oauth_redirect_allowlist = ["https://chatgpt.com/connector/oauth/{callback_id}"]
+    provider = GoogleOAuth(sessions, config)
+    redirect = "https://chatgpt.com/connector/oauth/test-callback_123"
+    host = client("dynamic-host")
+    host.redirect_uris = [AnyUrl(redirect)]
+    await provider.register_client(host)
+    stored = await provider.get_client(host.client_id)
+    assert str(stored.redirect_uris[0]) == redirect
+    # 只注册提交的精确 URI；模板不会成为客户端后续授权的可变 redirect。
+    for unsafe in (
+        "https://chatgpt.com.evil.example/connector/oauth/test",
+        "https://chatgpt.com/connector/oauth/",
+        "https://chatgpt.com/connector/oauth/test/extra",
+        "https://chatgpt.com/connector/oauth/test?next=https://evil.example",
+        "https://chatgpt.com/connector/oauth/%2e%2e",
+        "https://chatgpt.com/connector/oauth/test#fragment",
+        "https://user@chatgpt.com/connector/oauth/test",
+        "http://chatgpt.com/connector/oauth/test",
+        "http://127.0.0.1:9000/callback",
+    ):
+        host.redirect_uris = [AnyUrl(unsafe)]
+        with pytest.raises(RegistrationError):
+            await provider.register_client(host)
+
+
 async def test_subscription_refresh_ownership_rotation_and_delivery(sessions, monkeypatch):
     config = settings()
     provider = GoogleOAuth(sessions, config)
@@ -132,9 +161,20 @@ async def test_subscription_refresh_ownership_rotation_and_delivery(sessions, mo
     }
     assert await events.deliver_subscription(payload) == "accepted_by_receiver"
     assert posted[-1][0]["eventId"] == "event-123" and posted[-1][2] is not None
-    await events.unsubscribe(principal, first["id"])
+    # 官方复合参数退订无需 secret；错误 Host 的相同参数不能撤销本订阅。
+    from pace.domain.models import Principal
+
+    stop = {
+        "name": params["name"],
+        "arguments": {},
+        "delivery": {"mode": "webhook", "url": params["delivery"]["url"]},
+    }
+    await events.unsubscribe(Principal(principal.user_id, principal.scopes, "another-host"), stop)
+    assert await events.deliver_subscription(payload) == "accepted_by_receiver"
+    await events.unsubscribe(principal, stop)
+    await events.unsubscribe(principal, stop)
     assert await events.deliver_subscription(payload) == "inactive"
-    assert len(posted) == 3
+    assert len(posted) == 4
 
 
 async def test_credentials_cannot_cross_a_reconfigured_resource_origin(sessions, monkeypatch):
@@ -188,4 +228,53 @@ def test_oauth_metadata_and_browser_flow_cookie(sessions):
         assert (
             browser.post("/auth/consent", data={"flow": "attacker", "consent": "yes"}).status_code
             == 400
+        )
+
+
+async def test_browser_consent_google_redirect_and_private_failure(sessions, monkeypatch, caplog):
+    import httpx
+
+    provider = GoogleOAuth(sessions, settings())
+    host = client("browser-host")
+    await provider.register_client(host)
+    url = await provider.authorize(
+        host,
+        AuthorizationParams(
+            state="test-state",
+            scopes=["pace:sync", "pace:connect"],
+            code_challenge="c" * 43,
+            redirect_uri="http://127.0.0.1:9000/callback",
+            redirect_uri_provided_explicitly=True,
+            resource=provider.resource,
+        ),
+    )
+    flow = parse_qs(urlsplit(url).query)["flow"][0]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(Starlette(routes=auth_routes(provider))),
+        base_url=provider.base,
+    ) as browser:
+        page = await browser.get(url)
+        assert page.status_code == 200
+        assert (
+            "form-action 'self' https://accounts.google.com;"
+            in page.headers["content-security-policy"]
+        )
+        assert browser.cookies.get("pace_oauth_flow") == flow
+        redirect = await browser.post("/auth/consent", data={"flow": flow, "consent": "yes"})
+        assert redirect.status_code == 303
+        assert urlsplit(redirect.headers["location"]).hostname == "accounts.google.com"
+
+        async def failed_google(code, payload):
+            raise RuntimeError("synthetic-private-token")
+
+        monkeypatch.setattr(provider, "google_claims", failed_google)
+        failed = await browser.get(
+            "/auth/google/callback", params={"state": flow, "code": "synthetic-private-code"}
+        )
+        assert failed.status_code == 400
+        assert failed.json() == {"error": "gmail_authorization_failed"}
+        assert "reason=RuntimeError" in caplog.text
+        assert all(
+            private not in caplog.text
+            for private in (flow, "synthetic-private-token", "synthetic-private-code")
         )

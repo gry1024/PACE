@@ -7,7 +7,7 @@ from typing import Protocol
 
 from pace.application.contracts import ConnectInput, SyncEntityInput, payload_hash
 from pace.application.tournament import Tournament
-from pace.domain.errors import PaceError, SelectionLimit
+from pace.domain.errors import PaceError, SelectionLimit, VersionConflict
 from pace.domain.models import Principal
 
 
@@ -31,7 +31,7 @@ class PersistentCommands:
         self.max_candidates = max_candidates
 
     async def sync_entity(self, principal: Principal, data: SyncEntityInput):
-        """同步由数据库原子更新 / 回执 / 入队边界实现，返回实际接受版本。"""
+        """同步由数据库原子发布 / 回执边界实现，不调用模型或入队构建。"""
         return await self.store.synchronize(principal, data)
 
     async def connect(self, principal: Principal, data: ConnectInput):
@@ -44,6 +44,8 @@ class PersistentCommands:
             if old is not None:
                 return old
             requester = await unit.requester()
+            if requester[1].version != data.entity_version:
+                raise VersionConflict()
             candidates = await unit.candidates(self.max_candidates + 1)
             await unit.begin_request(requester, payload_hash(data))
             try:
@@ -64,15 +66,3 @@ class PersistentCommands:
         if failure is not None:
             raise failure
         return result
-
-
-def apply_updates(entries: list[dict], updates) -> list[dict]:
-    """明确 upsert/remove；未知 remove 幂等，D/S 各自独立命名空间。"""
-    result = {entry["entry_id"]: dict(entry) for entry in entries}
-    for update in updates:
-        key = str(update.entry_id)
-        if update.operation == "remove":
-            result.pop(key, None)
-        else:
-            result[key] = {"entry_id": key, "text": update.text}
-    return [result[key] for key in sorted(result)]

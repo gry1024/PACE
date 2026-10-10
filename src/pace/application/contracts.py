@@ -8,7 +8,7 @@
 """Versioned business contracts. Identity is supplied by the transport, not tool input."""
 
 import hashlib
-from typing import Annotated, Literal
+from typing import Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -23,86 +23,38 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-# 实现说明：SourceFile
-# Host 明确授权并实际读取后的文本与来源。
-#
-# source_id 是稳定来源键，content_hash 对应原样 UTF-8 文本，observed_at 需有时区。
-# 这里只校验声明的一致性，不证明 Host 真的获得权限或文件可信。
-class SourceFile(Contract):
-    source_id: str = Field(min_length=1, max_length=200)
-    name: str = Field(min_length=1, max_length=255)
-    text: str
-    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    observed_at: AwareDatetime
-
-    # 实现说明：SourceFile.validate_content
-    # 完成文件类型、大小与内容指纹校验。
-    #
-    # 哈希基于未裁剪、未规范化的 UTF-8 原文；避免服务器与 Host 对不同内容建立相同来源引用。
-    # 单文件上限 1 MiB，限制的是字节而不是字符数量；中文编码需要计入。
-    @model_validator(mode="after")
-    def validate_content(self):
-        if not self.name.lower().endswith((".txt", ".md")):
-            raise ValueError("Only TXT and Markdown are supported.")
-        if len(self.text.encode("utf-8")) > 1024 * 1024:
-            raise ValueError("File exceeds 1 MiB.")
-        if hashlib.sha256(self.text.encode("utf-8")).hexdigest() != self.content_hash:
-            raise ValueError("content_hash must be the SHA-256 of the UTF-8 text.")
-        return self
+# PA 提供完整画像，后端只校验结构与预算，不提炼或推断事实。
+# O/D/S 必须全部提交；空文本 / 空列表表示明确清除，不使用增量合并。
+# 初始持续授权覆盖连接前同步，实际可访问资料及工具确认仍由 PA 平台管理。
+PROFILE_FORMAT = "pa-entity-v1"
+MAX_PROFILE_BYTES = 4000
 
 
-# 实现说明：UpsertEntry
-# 明确新增或更新一条长期 Demand / Supply。
-#
-# 稳定 entry_id 支持后续更新；不能由即时 Request 隐式构造此对象。
-class UpsertEntry(Contract):
-    operation: Literal["upsert"]
-    entry_id: UUID
-    text: str = Field(min_length=1, max_length=10000)
-
-
-# 实现说明：RemoveEntry
-# 明确撤销某条长期意图，仅需要稳定 entry_id。
-#
-# 没有 text 字段，避免把撤销操作与更新语义混在一起。
-class RemoveEntry(Contract):
-    operation: Literal["remove"]
-    entry_id: UUID
-
-
-# 按 operation 区分 upsert / remove，生成明确的联合 Schema 而非猜测字段语义。
-EntryUpdate = Annotated[UpsertEntry | RemoveEntry, Field(discriminator="operation")]
-
-
-# 实现说明：SyncEntityInput
-# 实体同步请求：幂等键、授权文件、明确长期更新与预期版本。
-#
-# files=None 表示未提交文件变更，files=[] 是明确空集合；具体合并规则待用例实现。
-# expected_entity_version 只做非负校验，真正版本冲突需数据库事务检查。
 class SyncEntityInput(Contract):
     request_id: UUID
-    files: list[SourceFile] | None = Field(default=None, max_length=20)
-    demand_updates: list[EntryUpdate] = Field(default_factory=list)
-    supply_updates: list[EntryUpdate] = Field(default_factory=list)
+    ontology: str = Field(max_length=4000)
+    demands: list[str] = Field(max_length=20)
+    supplies: list[str] = Field(max_length=20)
     expected_entity_version: int | None = Field(default=None, ge=0)
 
-    # 实现说明：SyncEntityInput.validate_updates
-    # 确保这次调用确实表达更新且不存在同批重复来源 / 长期项。
-    #
-    # 分别检查 D、S 内部 entry_id，不禁止 D/S 使用同一 ID（两类是不同命名空间）。
-    # 文件合计限制 8 MiB，不包含 JSON 转义和 HTTP body 的额外开销。
     @model_validator(mode="after")
-    def validate_updates(self):
-        if self.files is None and not self.demand_updates and not self.supply_updates:
-            raise ValueError("At least one explicit update is required.")
-        if self.files is not None:
-            if len({f.source_id for f in self.files}) != len(self.files):
-                raise ValueError("source_id must be unique.")
-            if sum(len(f.text.encode("utf-8")) for f in self.files) > 8 * 1024 * 1024:
-                raise ValueError("Files exceed 8 MiB total.")
-        for updates in (self.demand_updates, self.supply_updates):
-            if len({u.entry_id for u in updates}) != len(updates):
-                raise ValueError("An entry can only be updated once per request.")
+    def validate_profile(self):
+        """拒绝空白长期项和超预算完整画像；不裁剪或改写 PA 正文。"""
+        for entries in (self.demands, self.supplies):
+            if any(not entry.strip() for entry in entries):
+                raise ValueError("Long-term entries cannot be blank.")
+            if len(set(entries)) != len(entries):
+                raise ValueError("Long-term entries must be unique.")
+        if self.ontology and not self.ontology.strip():
+            raise ValueError("ontology must be empty or nonblank.")
+        if (
+            sum(
+                len(value.encode("utf-8"))
+                for value in (self.ontology, *self.demands, *self.supplies)
+            )
+            > MAX_PROFILE_BYTES
+        ):
+            raise ValueError("O/D/S exceeds 4000 UTF-8 bytes.")
         return self
 
 
@@ -135,6 +87,7 @@ class RequestContext(Contract):
 # Request 必须单独持久化，不能自动转为 Demand；context 与文本共同参与判断。
 class ConnectInput(Contract):
     request_id: UUID
+    entity_version: int = Field(ge=1)
     request_text: str = Field(min_length=1, max_length=10000)
     context: RequestContext
 
@@ -150,16 +103,13 @@ class ConnectInput(Contract):
         return value
 
 
-# 实现说明：SyncEntityResult
-# 真实任务接受后的同步状态契约。
-#
-# entity_version / status / job_id 必须对应实际持久数据；accepted 不等于 Build 完成。
+# 同步在调用者事务内立即发布；changed=False 表示原样内容未新增版本。
+# 相同 request_id 的重试仍返回原回执，不覆盖之后接受的版本。
 class SyncEntityResult(Contract):
     status: Literal["accepted"]
     entity_version: int
-    entity_status: Literal["building", "ready", "refreshing"]
-    job_id: UUID | None = None
-    accepted_updates: list[str]
+    entity_status: Literal["ready"] = "ready"
+    changed: bool
 
 
 # 实现说明：CandidateResult
@@ -190,7 +140,7 @@ class NotificationState(Contract):
 # 实现说明：ConnectResult
 # 匹配与 No Match 共用的结果契约。
 #
-# ontology_refresh 固定提示 Host 在返回后重新收集；不能谎称 Worker 已读取远端文件。
+# 使用调用者同步回执中的 entity_version；连接后不再触发同步。
 class ConnectResult(Contract):
     status: Literal["matched", "no_match"]
     request_id: UUID
@@ -198,7 +148,6 @@ class ConnectResult(Contract):
     connection_id: UUID | None = None
     candidate: CandidateResult | None = None
     notification: NotificationState | None = None
-    ontology_refresh: Literal["host_collection_required"] = "host_collection_required"
 
     # 实现说明：ConnectResult.validate_outcome
     # 约束结果分支，避免 No Match 泄露联系方式或伪造通知。

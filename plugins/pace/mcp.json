@@ -3,7 +3,21 @@
   "mcpServers": {
     "pace": {
       "type": "streamable-http",
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "pace:sync",
+              "pace:connect"
+            ]
+          }
+        }
+      }
     }
   }
 }

@@ -2,6 +2,7 @@
 """Browser consent binds each Google flow to an HttpOnly cookie."""
 
 import html
+import logging
 import secrets
 
 from mcp.server.auth.provider import construct_redirect_uri
@@ -14,12 +15,16 @@ from starlette.routing import Route
 from pace.adapters.auth.google import SCOPES
 from pace.domain.errors import PaceError
 
+logger = logging.getLogger(__name__)
+
 
 def auth_routes(provider):
     """SDK 校验注册 URI / scope / PKCE，本层只实现 Google 同意和验证回跳。"""
     secure = provider.base.startswith("https://")
 
-    def error():
+    def error(reason="invalid_browser_flow"):
+        # 只记录固定失败分类；不输出 cookie、flow、授权码、Token 或异常正文。
+        logger.warning("gmail_authorization_failed reason=%s", reason)
         return JSONResponse(
             {"error": "gmail_authorization_failed"},
             status_code=400,
@@ -38,7 +43,7 @@ def auth_routes(provider):
             try:
                 response = RedirectResponse(await provider.google_redirect(flow), status_code=303)
             except PaceError:
-                return error()
+                return error("expired_or_consumed_flow")
         else:
             flow = request.query_params.get("flow", "")
             record = await provider._read("flow", flow)
@@ -51,11 +56,15 @@ def auth_routes(provider):
                 "<title>PACE Gmail 授权</title>"
                 f"<h1>连接 PACE</h1><p>客户端：{name}</p>"
                 "<p>仅支持已验证的 @gmail.com。相同 Gmail 在不同平台使用同一个 PACE 账号。</p>"
-                "<p>同意后，你可参与连接匹配；匹配会向双方披露 Gmail 和请求相关资料，"
-                "并向你的 Gmail 发送连接通知。登录不会授权读取你的邮件。</p>"
+                "<p>本次持续授权允许你的 PA 在安装初始化及每次连接前，"
+                "自动整理并上传与你有关的 O/D/S，"
+                "无需 PACE 再逐次确认。PACE 原样保存，并将相关画像交给 Jev 做匹配。</p>"
+                "<p>匹配会向双方披露 Gmail 和请求相关资料，向你的 PA 平台投递匹配事件，"
+                "同时向你的 Gmail 发送通知。平台收到事件后按你的设置运行 PA；"
+                "登录不会授权读取你的邮件。停止授权后不再处理新的访问与通知。</p>"
                 f"<form method='post'><input type='hidden' name='flow' value='{safe_flow}'>"
                 "<label><input type='checkbox' name='consent' value='yes' required>"
-                "同意 Gmail 身份绑定、连接资料披露和邮件通知</label>"
+                "同意 PA 自动同步、Jev 匹配、Gmail 披露与双通道通知</label>"
                 "<p><button type='submit'>使用 Google 继续</button></p></form></html>"
             )
             response.set_cookie(
@@ -70,7 +79,8 @@ def auth_routes(provider):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            "default-src 'none'; form-action 'self' https://accounts.google.com; "
+            "frame-ancestors 'none'; base-uri 'none'"
         )
         return response
 
@@ -87,9 +97,9 @@ def auth_routes(provider):
             return error()
         try:
             code, params = await provider.complete_google(flow, request.query_params["code"])
-        except Exception:
+        except Exception as exc:
             # Google SDK 失败可能包含凭据；只公开稳定错误，不回显异常详情。
-            return error()
+            return error(type(exc).__name__)
         response = RedirectResponse(
             construct_redirect_uri(
                 params["redirect_uri"],

@@ -1,7 +1,7 @@
 # 模块说明
 # 独立 Worker 进程与任务 Handler 生命周期。
 #
-# Worker 执行已注册 Ontology / Email / Event Handler，未知类型明确失败。
+# Worker 执行已注册 Email / Event Handler，未知类型明确失败。
 # 任务执行与续租并发，租约丢失终止当前路径，异常只记录稳定安全code。
 # run_once 返回是否曾领取任务，不是业务副作用成功标志。
 

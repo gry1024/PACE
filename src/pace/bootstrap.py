@@ -19,7 +19,6 @@ from pace.adapters.delivery.capture import CaptureEmail
 from pace.adapters.delivery.events import EventWebhooks
 from pace.adapters.delivery.gmail import GmailEmail
 from pace.adapters.providers.jev import JevChoiceProvider
-from pace.adapters.providers.ontology import LLMOntologyBuilder
 from pace.application.business import PersistentCommands
 from pace.application.ports import BusinessCommands, IdentityVerifier
 from pace.application.services import UnconfiguredCommands, UnconfiguredIdentity
@@ -40,7 +39,6 @@ class Container:
     commands: BusinessCommands
     database: Database | None
     choice: JevChoiceProvider | None
-    ontology: LLMOntologyBuilder | None = None
     oauth: GoogleOAuth | None = None
     events: EventWebhooks | None = None
     handlers: BusinessHandlers | None = None
@@ -54,7 +52,7 @@ class Container:
         results = await asyncio.gather(
             *(
                 resource.close()
-                for resource in (self.choice, self.ontology, self.database)
+                for resource in (self.choice, self.database)
                 if resource is not None
             ),
             return_exceptions=True,
@@ -92,11 +90,6 @@ def build_container(
             input_bytes=settings.jev_input_bytes,
         )
         if settings.jev_api_key
-        else None
-    )
-    ontology = (
-        LLMOntologyBuilder(settings)
-        if (settings.openai_api_key and settings.openai_model_name)
         else None
     )
     oauth = (
@@ -142,14 +135,13 @@ def build_container(
             if database
             else UnconfiguredCommands()
         )
-    handlers = BusinessHandlers(database.sessions, ontology, email, events) if database else None
+    handlers = BusinessHandlers(database.sessions, email, events) if database else None
     return Container(
         settings,
         identity or oauth or UnconfiguredIdentity(),
         commands,
         database,
         choice,
-        ontology,
         oauth,
         events,
         handlers,

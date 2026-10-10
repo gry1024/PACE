@@ -21,8 +21,8 @@ from pace.adapters.db.models import (
     Match,
     SyncReceipt,
 )
-from pace.application.business import apply_updates
 from pace.application.contracts import (
+    PROFILE_FORMAT,
     CandidateResult,
     ConnectionMatched,
     ConnectResult,
@@ -37,16 +37,7 @@ from pace.domain.errors import (
     VersionConflict,
 )
 from pace.domain.gmail import canonical_gmail
-from pace.domain.models import EntitySnapshot
-
-# 当前已授权来源必须覆盖快照的来源。撤销文件后旧完成快照不能继续披露它。
-AUTHORIZED_SOURCES = text("""NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements(entity_versions.sources) AS source
-    WHERE NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements(entities.files) AS file
-        WHERE file->>'source_id' = source->>'source_id'
-    )
-)""")
+from pace.domain.models import CONSENT_VERSION, EntitySnapshot
 
 
 async def advisory_lock(session, key: str):
@@ -62,8 +53,8 @@ def snapshot(row: EntityVersion) -> EntitySnapshot:
         row.account_id,
         row.version,
         data["ontology"],
-        tuple(e["text"] for e in data.get("demands", [])),
-        tuple(e["text"] for e in data.get("supplies", [])),
+        tuple(data.get("demands", [])),
+        tuple(data.get("supplies", [])),
     )
 
 
@@ -76,6 +67,7 @@ def eligible(account: Account) -> bool:
             and account.enabled
             and account.email_verified_at
             and account.consented_at
+            and account.consent_version == CONSENT_VERSION
         )
     except ValueError:
         return False
@@ -93,23 +85,31 @@ async def require_account(session, user_id, *, lock=False):
 
 
 async def latest(session, user_id):
-    """只查只追加的完成版本；刷新未完成时仍使用此前已完成版本。"""
+    """只查 PA 直接发布的完成版本；旧 LLM 历史需首次重新同步才能入池。"""
     return (
         await session.scalars(
             select(EntityVersion)
-            .where(EntityVersion.account_id == user_id)
+            .where(
+                EntityVersion.account_id == user_id, EntityVersion.prompt_version == PROFILE_FORMAT
+            )
             .order_by(EntityVersion.version.desc())
             .limit(1)
         )
     ).one_or_none()
 
 
-async def require_snapshot_sources(session, snapshot_id):
-    """快照来源被撤销后禁止新的披露；强制加载当前来源，避免 identity-map 旧值。"""
+async def require_current_snapshot(session, snapshot_id):
+    """完整画像替换撤销旧版本；旧匹配回执及待投递通知不能重新披露旧资料。"""
     row = await session.get(EntityVersion, snapshot_id)
     entity = await session.get(Entity, row.account_id, populate_existing=True) if row else None
-    authorized = {file["source_id"] for file in entity.files} if entity else set()
-    if row is None or any(source["source_id"] not in authorized for source in row.sources):
+    if (
+        row is None
+        or entity is None
+        or row.prompt_version != PROFILE_FORMAT
+        or entity.status != "ready"
+        or row.version != entity.version
+        or not any((row.snapshot["ontology"], row.snapshot["demands"], row.snapshot["supplies"]))
+    ):
         raise EntityNotReady()
 
 
@@ -161,58 +161,36 @@ class BusinessRepository:
             ):
                 raise VersionConflict()
             previous = await latest(session, principal.user_id)
-            entity.version += 1
-            entity.demands = apply_updates(entity.demands, data.demand_updates)
-            entity.supplies = apply_updates(entity.supplies, data.supply_updates)
-            if data.files is not None:
-                entity.files = [f.model_dump(mode="json") for f in data.files]
-            entity.updated_at = datetime.now(UTC)
-            # 只有 D/S 更新且基底是当前已发布版本时，不重新消耗 LLM。
-            ready = (
-                previous is not None
-                and previous.version == entity.version - 1
-                and data.files is None
+            profile = {
+                "ontology": data.ontology,
+                "demands": data.demands,
+                "supplies": data.supplies,
+            }
+            changed = (
+                previous is None
+                or previous.version != entity.version
+                or previous.snapshot != profile
             )
-            job_id = None
-            if ready:
-                entity.status = "ready"
+            if changed:
+                entity.version += 1
+                entity.ontology = {"text": data.ontology}
+                entity.demands, entity.supplies = data.demands, data.supplies
                 session.add(
                     EntityVersion(
                         account_id=entity.account_id,
                         version=entity.version,
-                        snapshot={
-                            "ontology": previous.snapshot["ontology"],
-                            "demands": entity.demands,
-                            "supplies": entity.supplies,
-                        },
-                        sources=previous.sources,
-                        model=previous.model,
-                        prompt_version=previous.prompt_version,
+                        snapshot=profile,
+                        sources=[],
+                        model=None,
+                        prompt_version=PROFILE_FORMAT,
                     )
                 )
-            else:
-                entity.status = "refreshing" if previous else "building"
-                job_id = await enqueue(
-                    session,
-                    "ontology.build",
-                    f"ontology:{entity.account_id}:{entity.version}",
-                    {
-                        "account_id": str(entity.account_id),
-                        "version": entity.version,
-                        "files": entity.files,
-                        "demands": entity.demands,
-                        "supplies": entity.supplies,
-                        "previous": previous.snapshot if previous else None,
-                    },
-                )
+            # 最近同步时间单独于快照版本；重复内容不新增历史 / 不触发模型。
+            entity.status, entity.updated_at = "ready", datetime.now(UTC)
             result = SyncEntityResult(
                 status="accepted",
                 entity_version=entity.version,
-                entity_status=entity.status,
-                job_id=job_id,
-                accepted_updates=(["files"] if data.files is not None else [])
-                + [f"demand:{u.entry_id}" for u in data.demand_updates]
-                + [f"supply:{u.entry_id}" for u in data.supply_updates],
+                changed=changed,
             )
             session.add(
                 SyncReceipt(
@@ -259,8 +237,8 @@ class ConnectionUnit:
                     ).one()
                     # 幂等不能绕过当前授权；历史回执仍保存，但撤销后拒绝新的读取披露。
                     await require_account(self.session, match.candidate_id)
-                    await require_snapshot_sources(self.session, self.request.snapshot_id)
-                    await require_snapshot_sources(self.session, match.candidate_snapshot_id)
+                    await require_current_snapshot(self.session, self.request.snapshot_id)
+                    await require_current_snapshot(self.session, match.candidate_snapshot_id)
                 return ConnectResult.model_validate(self.request.result)
         return None
 
@@ -268,7 +246,7 @@ class ConnectionUnit:
         row = await latest(self.session, self.principal.user_id)
         if row is None:
             raise EntityNotReady()
-        await require_snapshot_sources(self.session, row.id)
+        await require_current_snapshot(self.session, row.id)
         return row, snapshot(row)
 
     async def candidates(self, limit):
@@ -290,13 +268,28 @@ class ConnectionUnit:
                 .join(Entity, Entity.account_id == Account.id)
                 .where(
                     Account.id != self.principal.user_id,
+                    select(EventSubscription.id)
+                    .where(
+                        EventSubscription.account_id == Account.id,
+                        EventSubscription.event_type == "connection.matched",
+                        EventSubscription.verified_at.is_not(None),
+                        EventSubscription.revoked_at.is_(None),
+                        EventSubscription.expires_at > func.now(),
+                    )
+                    .exists(),
                     Account.enabled.is_(True),
                     Account.email_verified_at.is_not(None),
                     Account.consented_at.is_not(None),
+                    Account.consent_version == CONSENT_VERSION,
                     Account.google_subject.is_not(None),
                     Account.google_subject != "",
                     Account.email.bool_op("~")(r"^[a-z0-9]+@gmail\.com$"),
-                    AUTHORIZED_SOURCES,
+                    Entity.status == "ready",
+                    EntityVersion.version == Entity.version,
+                    EntityVersion.prompt_version == PROFILE_FORMAT,
+                    (Entity.ontology["text"].astext != "")
+                    | (Entity.demands != [])
+                    | (Entity.supplies != []),
                 )
                 .order_by(Account.id)
                 .limit(limit)
@@ -338,8 +331,8 @@ class ConnectionUnit:
             accounts = {}
             for user_id in sorted([self.principal.user_id, candidate.user_id], key=str):
                 accounts[user_id] = await require_account(self.session, user_id, lock=True)
-            await require_snapshot_sources(self.session, requester[0].id)
-            await require_snapshot_sources(self.session, row.id)
+            await require_current_snapshot(self.session, requester[0].id)
+            await require_current_snapshot(self.session, row.id)
             connection_id, event_id = uuid4(), uuid4()
 
             # 摘要为取自显式证据的模板，不能伪称 Jev 生成了自然语言理由。
@@ -368,9 +361,10 @@ class ConnectionUnit:
                     )
                 )
             ).all()
-            notification = NotificationState(
-                event="queued" if subscriptions else "not_subscribed", email="queued"
-            )
+            # 第一版服务对象必须有原生回调；选择期间订阅失效不能降级成仅邮件。
+            if not subscriptions:
+                raise AccountUnavailable()
+            notification = NotificationState(event="queued", email="queued")
             match = Match(
                 id=connection_id,
                 request_id=self.request.id,

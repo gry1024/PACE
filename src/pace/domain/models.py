@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
+# 持续授权的范围升级需要重新完成同意页；旧授权不能自动扩大。
+CONSENT_VERSION = "pa-connections-v2"
+
 
 # 实现说明：Principal
 # 经传输层验证的访问者身份。

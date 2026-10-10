@@ -19,7 +19,10 @@ def test_liveness_does_not_claim_business_readiness():
         response = client.get("/healthz")
         assert response.status_code == 200
         assert response.json() == {"status": "ok", "service": "pace", "stage": "mvp"}
-        assert client.get("/readyz").status_code == 503
+        readiness = client.get("/readyz")
+        assert readiness.status_code == 503
+        assert "llm_configuration" not in readiness.json()["pending"]
+        assert "mcp_events_configuration" in readiness.json()["pending"]
 
 
 # 实现说明：test_existing_jev_key_is_supported_without_leaking

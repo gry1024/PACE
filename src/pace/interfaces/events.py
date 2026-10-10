@@ -67,7 +67,7 @@ async def handle_event_request(scope, receive, send, principal, adapter, base):
         elif method == "events/subscribe":
             result = await adapter.subscribe(principal, params)
         else:
-            result = await adapter.unsubscribe(principal, params["id"])
+            result = await adapter.unsubscribe(principal, params)
         response = {"jsonrpc": "2.0", "id": identifier, "result": result}
     except CallbackError as exc:
         response = {

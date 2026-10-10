@@ -2,7 +2,7 @@
 # 声明应用层需要的外部能力，不包含 SDK 或网络实现。
 #
 # 使用 Python Protocol 做结构类型约束：满足方法签名的真实 Adapter / 测试桩都能注入。
-# 身份独立于 Tool 数据；选择独立于数据库；Ontology 和交付可分开实现、测试。
+# 身份独立于 Tool 数据；选择独立于数据库；PA 直接提交画像，交付通过独立 Port。
 # Protocol 存在不等于外部配置可用，具体实现由 bootstrap 选择。
 
 """Dependency boundaries used by application services."""
@@ -14,7 +14,6 @@ from pace.application.contracts import (
     ConnectInput,
     ConnectResult,
     RequestContext,
-    SourceFile,
     SyncEntityInput,
     SyncEntityResult,
 )
@@ -39,9 +38,9 @@ class IdentityVerifier(Protocol):
 # 输入身份由 transport 决定，具体命令负责授权、幂等、持久化和外部调用。
 class BusinessCommands(Protocol):
     # 实现说明：BusinessCommands.sync_entity
-    # 同步明确授权的文件和长期 D / S 更新。
+    # 原样发布 PA 提供的完整 O / D / S 快照。
     #
-    # 返回 accepted 只表示实际持久任务已接受，不表示 Ontology 生成完成。
+    # 返回 accepted / ready 表示快照已提交，立即可匹配，无后台构建任务。
     async def sync_entity(
         self, principal: Principal, data: SyncEntityInput
     ) -> SyncEntityResult: ...
@@ -69,18 +68,6 @@ class ChoiceProvider(Protocol):
         candidates: Sequence[EntitySnapshot],
         context: RequestContext | None = None,
     ) -> ChoiceDecision: ...
-
-
-# 实现说明：OntologyBuilder
-# 从明确上传的完整文件集重新构建 Ontology；空集合清除，D/S 不由模型推断。
-#
-# 不能替代 Host 去读取远端文件，也不能自动把即时请求改为长期需求。
-class OntologyBuilder(Protocol):
-    # 实现说明：OntologyBuilder.build
-    # 接收明确上传的文件与可选旧 Snapshot，返回 Ontology 文本。
-    #
-    # Worker 负责完成版本发布，Builder 只提取文本，不读取 Host 远端文件。
-    async def build(self, files: Sequence[SourceFile], previous: EntitySnapshot | None) -> str: ...
 
 
 # 实现说明：EventDelivery

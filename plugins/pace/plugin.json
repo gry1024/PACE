@@ -2,6 +2,11 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "pace",
   "version": "0.1.0",
-  "description": "Gmail identity, authorized profile synchronization and PACE connections.",
-  "license": "MIT"
+  "description": "Personal-agent profiles, Jev matching, MCP Events and verified Gmail notifications.",
+  "license": "MIT",
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/setup/SKILL.md"
+    }
+  }
 }

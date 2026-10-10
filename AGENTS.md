@@ -33,13 +33,15 @@ uv run python scripts/check_docs.py
 
 ## Architecture guardrails
 
-- Host / Platform adapter 负责授权文件读取和身份接入；PACE backend 负责 Entity 与 Matching。Worker 只能处理已提交的文本，不能代替远端 Host 收集文件。
+- Host / PA 负责自身记忆整理、实际资料权限、身份与事件触发；PACE backend 直接接收完整 O/D/S，负责 Entity 与 Matching。每次 connect 前同步，安装时先初始化入池，连接后 / 定时不同步；不恢复后端 LLM 或文件收集。Worker 仅投递 MCP Events 与 Gmail，MVP 不做 A-to-A 或不支持事件平台适配。
 - `domain` 不依赖传输、ORM 或 Provider SDK；`application` 通过 Port 请求外部能力；具体 Adapter 在装配入口选择。API 装配在 `bootstrap`，Worker 装配在 `interfaces.worker.run`。
 - Selection 通过 `ChoiceProvider`；Tournament 编排留在 application，SDK Adapter 只处理证据和协议转换。错误不得伪装为 No Match；组内概率不能作为全局成功率。
-- 业务 MCP surface 保持 `sync_entity` / `connect`；`connection.matched` 是 Event。可信 `Principal` 来自验证器，不能从 Tool 参数的 Email / user ID 推导身份。
+- 业务 MCP surface 保持 `sync_entity` / `connect`；`connection.matched` 是 Event。connect 必须携带同步回执的 entity_version；业务不逐次要求人确认，当前持续同意版本由 domain 定义，旧同意需重新授权。可信 `Principal` 来自验证器，不能从 Tool 参数的 Email / user ID 推导身份。
 - 即时 Request 与长期 D/S 分开；业务数据与任务入队共享调用者事务；外部副作用按至少一次执行设计幂等。
 
 ## Workflow
+
+用户确认本次开发结束后，检查提交范围与秘密排除，运行相关验证，将本次项目修改 commit 并 push 到当前开发分支；报告分支与 commit。服务器可保留为无 `.git` 的部署副本，源码 / 公开文档与确认的本地版本同步，私有环境与数据库各自保留。
 
 改代码前阅读 [STATUS](docs/STATUS.md)、[ARCHITECTURE](docs/ARCHITECTURE.md) 与相关 [CODEMAP](docs/CODEMAP.md) 条目，核对当前源码；旧文档和测试桩不能证明功能完成。改后运行对应测试；涉及持久化必须验证真实 PostgreSQL 路径。项目自有代码保持准确的中文职责、约束和失败路径注释，避免仅为注释改动协议 docstring / 运行字符串。
 

@@ -38,13 +38,15 @@ TOOL_CONTRACTS = {
 # 由唯一契约映射生成官方 SDK Tool 对象。
 #
 # 输入 / 输出 Schema 均来自 Pydantic；两项操作会改变状态并可能访问外部世界。
-# sync_entity 允许 remove，因此 destructiveHint=True；持久用例实现同身份 / 同请求键重放。
+# sync_entity 完整替换画像，因此 destructiveHint=True；持久用例实现同身份 / 同请求键重放。
 def tool_definitions() -> list[types.Tool]:
     descriptions = {
-        "sync_entity": "Sync authorized TXT/Markdown and explicit long-term D/S updates.",
+        "sync_entity": (
+            "Publish the complete PA-prepared O/D/S profile before connect; ready immediately."
+        ),
         "connect": (
             "Submit an instant request; return Top-1 contact or No Match. "
-            "After returning, recollect authorized files and call sync_entity."
+            "First call sync_entity and pass its entity_version; do not sync after returning."
         ),
     }
     return [
@@ -114,7 +116,10 @@ def build_server(container: Container) -> Server:
         "pace",
         version="0.1.0",
         instructions=(
-            "PACE Gmail connections. Use only explicitly authorized files and D/S updates."
+            "PACE connections for event-capable personal agents. Under ongoing setup consent, "
+            "prepare a rich O/D/S profile and sync before every connect; pass its entity_version. "
+            "Subscribe to connection.matched and initialize a profile during setup. "
+            "No scheduled sync or agent-to-agent chat."
         ),
         on_list_tools=list_tools,
         on_call_tool=call_tool,

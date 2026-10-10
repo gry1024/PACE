@@ -32,26 +32,22 @@ wsl -d Ubuntu-22.04 --cd /home/groy/pace -- bash -lc 'uv sync --locked'
 | DATABASE_URL | 未配置 | DB / Worker / migration；postgresql:// 自动转 psycopg URL，或直接用 postgresql+psycopg://；不接受 SQLite |
 | TYPESAFE_API_KEY / JEV_API_KEY | 未配置，官方名优先，兼容旧名 | Jev Client |
 | JEV_MODEL | jev-1.13.0 | 固定选择模型基线 |
-| OPENAI_API_KEY | 未配置 | Ontology 提取与显式诊断 |
-| OPENAI_BASE_URL | https://api.openai.com/v1 | OpenAI 兼容服务地址 |
-| OPENAI_MODEL_NAME | 未配置 | Ontology 需要 Key + model |
 | PROVIDER_TIMEOUT_SECONDS | 20，>0 | Jev Adapter 单请求超时 |
 | JEV_INPUT_BYTES | 24000，1000–24000 | Jev 输入 JSON 保守预算 |
 | SELECTION_CONCURRENCY | 4，1–16 | connect / demo 单次 Tournament 的并发上限 |
 | WORKER_LEASE_SECONDS | 300，≥3 | 领取租约，heartbeat 每三分之一周期续租 |
 | WORKER_POLL_SECONDS | 2，>0 | Worker 空队列休眠秒数 |
 | CONNECT_TIMEOUT_SECONDS / MAX_CANDIDATES | 60秒 / 128，分别≤300 / ≤1000 | 单次连接总选择预算；超限报错 |
-| ONTOLOGY_INPUT_BYTES / ONTOLOGY_MAX_OUTPUT_TOKENS | 48000 / 800 | 输入整体预算及输出上限；失败不截断资料 |
 | PUBLIC_BASE_URL | http://127.0.0.1:8000 | HTTPS origin，HTTP仅loopback；固定issuer与/mcp resource |
 | GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET | 未配置 | Google Web OAuth，仅openid/email |
 | ENCRYPTION_KEY | 未配置 | 长期Fernet密钥；clientsecret/verifier/webhooksecret密文 |
-| OAUTH_REDIRECT_ALLOWLIST | []，JSON精确URI列表 | 受信任Host回跳；开发环境另允许HTTP loopback |
+| OAUTH_REDIRECT_ALLOWLIST | []，JSON精确URI列表 | 受信任Host精确回跳或受限callback_id模板；开发环境另允许HTTP loopback |
 | OAUTH_ACCESS_SECONDS / OAUTH_REFRESH_SECONDS | 3600 / 2592000 | access与refresh有效期，轮换旧族立即失效 |
 | EMAIL_DELIVERY_MODE / CAPTURE_DIRECTORY | capture / .local/mail | 本地捕获或gmail；不接受其它模式 |
 | GMAIL_SENDER | 未配置，个人Gmail | 独立系统发件账号 |
 | GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN | 未配置 | 发件账号独立gmail.send OAuth授权 |
 
-配置 Key + model 时装配 Ontology Adapter；实际调用由 Worker 触发，启动不自动消耗额度。`doctor --database` 使用 psycopg 原始连接参数，建议环境采用普通 `postgresql://` URL；不要向它提供 SQLAlchemy 专用 `postgresql+psycopg://` URL。
+后端不构建 Ontology，旧 OPENAI_* / ONTOLOGY_* 字段被忽略，已有私有 env 不需删除或改写。Jev 只在 connect / 显式诊断调用，启动不自动消耗额度。`doctor --database` 使用 psycopg 原始连接参数，建议环境采用普通 `postgresql://` URL；不要向它提供 SQLAlchemy 专用 `postgresql+psycopg://` URL。
 
 ## Database setup
 
@@ -91,7 +87,7 @@ uv run python -m pace.interfaces.worker --once
 uv run python -m pace.interfaces.worker
 ```
 
-生产注册表包含 ontology.build / email.send / event.deliver；API 和 Worker 需要相同配置。默认邮件 capture，只有明确配置 gmail 才真实发送；空队列 --once 正常退出不能证明 Worker 已处理业务。
+生产注册表只包含 email.send / event.deliver；API 和 Worker 需要相同配置。默认邮件 capture，只有明确配置 gmail 才真实发送；空队列 --once 正常退出不能证明 Worker 已处理业务。
 
 ## Test、lint 与 format
 
@@ -130,40 +126,49 @@ uv run python scripts/demo_selection.py
 uv run python scripts/demo_selection.py --live
 uv run python scripts/doctor.py --providers
 uv run python scripts/demo_business.py
-# 有限真实闭环：最多1次LLM + 2次Jev，仅合成资料与本地捕获
+# 有限真实闭环：最多2次Jev，后端零LLM，仅合成资料与本地捕获
 uv run python scripts/demo_business.py --live
 ```
 
-默认 demo = fixture_orchestration_only；答案来自 offline_demo_winner，不是模型判断。live = live_jev_synthetic，使用 Jev Adapter，不创建业务数据。doctor 无参数只输出包版本和配置 bool；--database 做 SELECT 1；--providers 并行 Jev / LLM 最小诊断，仅输出状态 / 类型 / 耗时，不证明 Ontology 或模型效果。
+默认 demo = fixture_orchestration_only；答案来自 offline_demo_winner，不是模型判断。live = live_jev_synthetic，使用 Jev Adapter，不创建业务数据。doctor 无参数只输出包版本和配置 bool；--database 做 SELECT 1；--providers 仅 Jev 最小诊断，仅输出状态 / 类型 / 耗时，不证明 PA 画像或模型效果。
 
 demo_business 使用独立随机 pace_demo_* schema，执行完整迁移和持久用例、Worker、通知capture，finally只删除自身schema与临时捕获目录。需要数据库CREATE SCHEMA权限；不向真人发送邮件。默认两个选择是离线桩，不证明效果；--live调用实际Provider且不自动扩大预算。避免为了重复检查接线不断运行付费命令。
 
 ## Gmail 身份与发件配置
 
+人工操作只有一个入口：`.local/MVP_HANDOFF.md` 内的一张顺序表，具体点击步骤与填写格在同一行。按表中状态继续；公开 [入口说明](MVP_SETUP_CHECKLIST.md) 不含待填模板。旧表仅在 `.local/backups/` 留档，不填写备份或 docs。
+
 保留现有 `.env` 与 `.env.local`；只在私有配置中补充 `.env.example` 展示的字段。API与Worker使用相同持久Key，禁止把Fernet Key放日志、聊天、Git或公开终端历史。
 
 1. 在Google Cloud配置Web OAuth客户端，注册精确redirect：`PUBLIC_BASE_URL/auth/google/callback`，设置相应同意屏幕与测试用户。PACE只申请openid/email，不接受非个人@gmail.com。
 2. 私有配置填GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET及稳定Fernet ENCRYPTION_KEY。Key可用cryptography的Fernet.generate_key生成，并直接安全保存；不要把实际Key当作调试输出。
-3. 为目标Host将其实际OAuth回跳URI加入OAUTH_REDIRECT_ALLOWLIST（JSON列表）。只允许可信精确地址；生产设置APP_ENV=production；PUBLIC_BASE_URL是origin且生产为HTTPS，不能带path/query。
+3. 为目标Host将其实际OAuth回跳URI加入OAUTH_REDIRECT_ALLOWLIST（JSON列表）。只允许可信精确地址，或显式配置 `https://chatgpt.com/connector/oauth/{callback_id}` 这样的单段 ID 模板；不是任意 URL 通配。当前 ChatGPT 也允许精确固定 URI `https://chatgpt.com/connector_platform_oauth_redirect`，依据官方回跳模式使用。生产设置APP_ENV=production；PUBLIC_BASE_URL是origin且生产为HTTPS，不能带path/query。
 4. 迁移至head，同时启动API与Worker。使用Host OAuth授权，检查同意页、Google Gmail登录、同账号跨Host关联、401/过期/撤销行为。字段存在与离线模拟不能代替真人Google验收。
-5. 真实发件使用独立系统Gmail，在Google启用Gmail API，按[Google服务器端OAuth流程](https://developers.google.com/identity/protocols/oauth2/web-server)获取系统发件账号的refresh token，授权范围gmail.send。设置GMAIL_SENDER、GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN，明确将EMAIL_DELIVERY_MODE改为gmail后重启Worker。
+5. 真实发件使用独立系统Gmail，在Google启用Gmail API，按[Google服务器端OAuth流程](https://developers.google.com/identity/protocols/oauth2/web-server)获取系统发件账号的refresh token，授权范围gmail.send。设置GMAIL_SENDER、GMAIL_CLIENT_ID、GMAIL_CLIENT_SECRET、GMAIL_REFRESH_TOKEN，明确将EMAIL_DELIVERY_MODE改为gmail后重启Worker。 External + Testing 的 gmail.send refresh token 通常只有7天有效；正式运行前补齐真实品牌网页、切换生产状态并按适用要求处理审核，再重新授权获取令牌。Access token 可自动刷新，但不能延长测试 refresh token 的固定期限；当前实际配置 / 验收进度见 [STATUS](STATUS.md#配置与外部验收进度日志)。
 6. 用明确授权的测试收件Gmail验收邮件内容、服务商接受和实际到达。只有provider_accepted不保证收件；异常重试可能重复发送。登录用户不需要授权PACE读自己的邮箱。
 
 缺Google配置时不会有身份绕过；不要在生产注入TestIdentity或seed假账号。`/readyz`只检查配置与DBrevision，不发送测试邮件、不调用模型，也不探测Worker存活。具体返回见[INTERFACES](INTERFACES.md)。
 
-## Host 接入包与授权收集
+### Google 登录网络诊断
 
-接入包源码在[plugins/pace](../plugins/pace/plugin.json)，配置在[mcp.json](../plugins/pace/mcp.json)，流程见[连接skill](../plugins/pace/skills/connections/SKILL.md)。当前MCP地址指向本地API；部署时在私有打包副本改为实际公网HTTPS地址，不把Token放进manifest。包未自动安装到当前Host，也未发布。
-
-本地collector只接受已授权根目录和明确相对文件列表，不扫描其它文件、不联网。示例（先由用户授权相应文件上传到PACE）：
+浏览器能打开 Google 不代表后端能访问 Google。API 必须能访问 oauth2.googleapis.com/token 与 Google 签名证书接口；Worker 发件还需要 gmail.googleapis.com。先用不带凭据的请求检查连通性，HTTP 400/404 等说明已经连通，000 / timeout 则需修复网络。不要重复使用已消费的登录回跳；重新从插件发起完整授权。
 
 ```bash
-uv run python plugins/pace/scripts/collect.py --root /absolute/authorized/root --file profile.md --file notes.txt --output .local/sync-input.json
+curl -s -o /dev/null --connect-timeout 5 --max-time 12 -w '%{http_code}\n' https://oauth2.googleapis.com/token
+curl -s -o /dev/null --connect-timeout 5 --max-time 12 -w '%{http_code}\n' https://www.googleapis.com/oauth2/v1/certs
 ```
 
-拒绝输出覆盖；重新收集使用新文件/请求ID，重试原操作保留原载荷与ID。远端connector由Host按其权限读取，计算提交文本hash。files为完整当前授权集合，不是增量补丁；[]会撤销所有来源。模型输入预算可能小于契约上传上限，超出时缩小授权集合后以新请求ID提交。
+`gmail_authorization_failed` 的详细诊断只看受限私有日志中的 reason：invalid_browser_flow 是 cookie / state / 同意输入未通过，expired_or_consumed_flow 需重新授权；Google 调用异常只记录异常类名。禁止打印回调完整 URL、原始异常或完整环境配置。CSP 放行 Google 并不证明浏览器实际跳转或 Google 回跳已验收。
 
-在Host连接实际/mcp后验收发现、两项Tool、Google授权、首次sync/build/connect及返回后的再次收集sync。MCP Events需要Host提供callback和secret，不能编造；使用公网HTTPS后验收challenge、订阅刷新、签名、过期、撤销与410/413。官方支持边界见[MCP Events](https://developers.openai.com/plugins/build/mcp-events)及[插件打包](https://developers.openai.com/plugins/build/plugins)。
+## Host 接入包与连接前同步
+
+接入包在 [plugins/pace](../plugins/pace/plugin.json)，OAuth / scopes 声明在 [mcp.json](../plugins/pace/mcp.json)，安装阶段执行 [setup skill](../plugins/pace/skills/setup/SKILL.md)，日常请求执行 [连接 skill](../plugins/pace/skills/connections/SKILL.md)。本地 MCP 地址只用于开发，部署在私有副本改公网 HTTPS URL；没有自动安装或发布。
+
+初期验收 ChatGPT Work 网页 / 桌面 Cloud 及 dots，实际账号需开放事件触发任务。仅做原生 MCP Events 回调，不适配不接收事件 / 不能运行 PA 的平台。Host 提供 callback 和 secret，PACE 验证并持久化；不要人工编造 env。验收 OAuth、订阅 / challenge / 刷新、连接匹配、签名事件、PA 实际通知用户及 Gmail 到达。插件安装不代表已建立监控，参考 [官方 Events](https://developers.openai.com/plugins/build/mcp-events) 和 [插件打包](https://developers.openai.com/plugins/build/plugins)。
+
+安装阶段先 sync 初始化，让用户无需先发起连接也能被匹配。首次 Google 登录创建 Account 并取得持续上传 / 披露同意，无独立注册站点；旧同意版本需重新完成浏览器流程。PACE 不逐次要求人确认上传，但 Host 工具与监控权限仍必须设置。每个新 connect 前 PA 直接从记忆生成完整 O/D/S，sync 立即 ready，再把返回的 entity_version 带入 connect。内容未变不增加版本；三字段空值明确清除。连接后、事件接收时和定时不更新，不需要本地 collector 或文件输入。
+
+完整契约和字节预算见 [INTERFACES](INTERFACES.md)。Worker 仅投递通知，订阅到期刷新由 Host 维护，不是定时同步。旧 ontology.build 任务不会执行构建，按未知任务有限失败；升级后的旧 LLM 画像需 PA 首次同步才重新进入候选。
 
 | 现象 | 直接检查 |
 | --- | --- |
@@ -171,9 +176,29 @@ uv run python plugins/pace/scripts/collect.py --root /absolute/authorized/root -
 | pg_ctl 不存在 | 安装 PostgreSQL 或设置 PG_BIN |
 | 端口冲突 | 查看项目日志、选择首次初始化端口；不要停止未知服务 |
 | /mcp 401 / 503 | INTERFACES 默认身份边界；不能编造 Token 绕过 |
-| 输入过长 | Jev 预算与文件文本 / HTTP body 的独立限额；缩小输入，不静默截断硬约束 |
+| 输入过长 | O/D/S 4000 UTF-8 bytes 与 Jev 整体输入 / HTTP body 的独立限额；缩小输入，不静默截断硬约束 |
 | migration 漂移 | 核对 ORM 与 migration；运行 alembic check，不用 create_all 掩盖 |
 | 修改环境后未生效 | 重启进程，区分文件配置与环境覆盖 |
+
+## 独立服务器部署
+
+部署文件在 `deploy/`：Dockerfile 使用 Python 3.12 与 uv.lock；compose 分开 API、Worker、PostgreSQL，数据库不发布宿主机端口，API 仅绑定 127.0.0.1:8010。远端工作目录为 `/home/dev/pace`；私有 `.env` 需要 PACE_DB_PASSWORD、独立 DATABASE_URL、稳定 ENCRYPTION_KEY、PUBLIC_BASE_URL 及已有 Provider / Gmail 配置。不得复制本机开发数据库连接串或把秘密加入镜像。
+
+在远端工作目录运行：
+
+```bash
+docker compose --env-file .env -f deploy/compose.yaml build api
+docker compose --env-file .env -f deploy/compose.yaml up -d db
+docker compose --env-file .env -f deploy/compose.yaml run --rm api alembic upgrade head
+docker compose --env-file .env -f deploy/compose.yaml up -d api worker
+docker compose --env-file .env -f deploy/compose.yaml ps
+```
+
+`public/` 是邀请测试首页、隐私说明与条款；安装到 `/var/www/pace`。Nginx 模板复用 clawcrony.com 的现有证书，以根域名为 origin，www 跳转根域名；安装前备份原站点，`nginx -t` 成功后 reload，失败恢复备份。关闭访问日志，避免 OAuth 查询参数进入日志。证书续期不由 Compose 管理，需单独维护。
+
+首轮服务器网络下载缓慢，实际使用私有 `.local/Dockerfile.offline` 与 `.local/compose.offline.yaml` 构建：先在本机独立项目副本执行 `uv sync --offline --locked --no-dev --no-editable`，仅传输生成的运行虚拟环境，通过 BuildKit additional_contexts 安装，并修正 Python / 命令入口的绝对路径。镜像导入与真实迁移校验必须通过；不可直接把含开发依赖或凭据的本机环境当生产制品。网络恢复后可用上面的标准锁文件构建流程。
+
+数据库迁移独立执行，服务启动不会自动迁移。不要使用 `down -v`，该命令会删除 PACE 数据卷；旧应用目录、数据库和凭据保留。停止旧服务须核对归属与用户授权，不能把所有数据库或容器都视作旧应用。当前服务器部署 / 公网验收结果见 [STATUS](STATUS.md)。
 
 ## Documentation validation
 

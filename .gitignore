@@ -14,3 +14,6 @@ build/
 dist/
 .local/
 .research/
+
+# 个人编辑器配置不属于部署或项目版本。
+.vscode/

@@ -47,15 +47,9 @@ class Settings(BaseSettings):
         default=None, validation_alias=AliasChoices("TYPESAFE_API_KEY", "JEV_API_KEY")
     )
     jev_model: str = "jev-1.13.0"
-    openai_api_key: SecretStr | None = None
-    # 允许配置 OpenAI 兼容服务；配置存在不意味着 Ontology 已实现。
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_model_name: str | None = None
     # 显式总预算；限制候选池与模型输出，不把额度保护变成静默截断。
     connect_timeout_seconds: float = Field(default=60, gt=0, le=300)
     max_candidates: int = Field(default=128, ge=1, le=1000)
-    ontology_input_bytes: int = Field(default=48000, ge=1000, le=200000)
-    ontology_max_output_tokens: int = Field(default=800, ge=64, le=4000)
     # Google 登录仅申请 openid/email；通知从系统 Gmail 单独授权发送。
     public_base_url: str = "http://127.0.0.1:8000"
     google_client_id: str | None = None

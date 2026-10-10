@@ -71,8 +71,8 @@ def build_app(container: Container) -> FastAPI:
             pending.append("gmail_oauth_configuration")
         if container.choice is None:
             pending.append("jev_configuration")
-        if container.ontology is None:
-            pending.append("llm_configuration")
+        if container.events is None:
+            pending.append("mcp_events_configuration")
         if container.settings.email_delivery_mode != "gmail" or not all(
             (
                 container.settings.gmail_sender,

@@ -102,6 +102,18 @@ async def signed_post(url, secret, subscription_id, message_id, value, previous=
         raise CallbackError("connection_failed") from exc
 
 
+def subscription_id(principal, url):
+    """订阅与官方复合参数退订共用稳定键；身份只能来自 Principal。"""
+    return uuid5(
+        NAMESPACE_URL,
+        json.dumps(
+            [str(principal.user_id), principal.client_id, url, "connection.matched", {}],
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+
+
 class EventWebhooks:
     """每个 account/client/destination 独立订阅；无 replay，有期限且必须 challenge。"""
 
@@ -142,14 +154,7 @@ class EventWebhooks:
         url = delivery.get("url", "")
         if not isinstance(url, str):
             raise ValueError("Invalid subscription input.")
-        identifier = uuid5(
-            NAMESPACE_URL,
-            json.dumps(
-                [str(principal.user_id), principal.client_id, url, "connection.matched", {}],
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        )
+        identifier = subscription_id(principal, url)
         expires = datetime.now(UTC) + timedelta(milliseconds=min(ttl or 86400000, 86400000))
         async with self.sessions.begin() as session:
             await require_account(session, principal.user_id)
@@ -211,7 +216,22 @@ class EventWebhooks:
 
     async def unsubscribe(self, principal, identifier):
         """只操作当前 account/client 的订阅；不存在与不属于自己同样幂等返回。"""
-        identifier = UUID(identifier)
+        # 对外使用官方 name/arguments/delivery；内部终止投递仍可用已保存 UUID。
+        if isinstance(identifier, dict):
+            delivery = identifier.get("delivery", {})
+            url = delivery.get("url")
+            if (
+                not principal.client_id
+                or identifier.get("name") != "connection.matched"
+                or identifier.get("arguments", {}) != {}
+                or delivery.get("mode") != "webhook"
+                or not isinstance(url, str)
+                or not url
+            ):
+                raise ValueError("Invalid unsubscribe input.")
+            identifier = subscription_id(principal, url)
+        else:
+            identifier = UUID(identifier)
         async with self.sessions.begin() as session:
             row = (
                 await session.scalars(
